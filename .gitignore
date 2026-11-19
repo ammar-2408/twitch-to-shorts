@@ -1,0 +1,21 @@
+# Your API key: never upload it
+.env
+openshorts/.env
+
+# Videos and run data (gigabytes, GitHub refuses them)
+runs/
+clips/
+clips_long/
+*.mp4
+*.mkv
+
+# Not ours to share / not needed
+*.pdf
+*.pdb
+_backup/
+node_modules/
+*.log
+
+# OpenShorts demo images (not needed to run)
+openshorts/*.gif
+openshorts/screenshots/
