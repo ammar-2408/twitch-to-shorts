@@ -19,3 +19,13 @@ node_modules/
 # OpenShorts demo images (not needed to run)
 openshorts/*.gif
 openshorts/screenshots/
+
+# YouTube login cookies (private) and scratch files
+youtube-cookies.txt
+openshorts/work/
+split-demo/
+
+# Personal channel branding (not part of the tool)
+channel-art/
+yt-banner.png
+yt-profile.png

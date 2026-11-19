@@ -21,9 +21,9 @@ pushd openshorts
 docker compose up -d --build backend || (popd & echo OpenShorts failed to start. & pause & exit /b 1)
 popd
 
-rem --- Twitch link ---
+rem --- Stream link ---
 set "LINK=%~1"
-if "%LINK%"=="" set /p LINK=Paste the Twitch VOD link (twitch.tv/videos/...):
+if "%LINK%"=="" set /p LINK=Paste the stream link (Twitch twitch.tv/videos/... or YouTube youtube.com/watch?v=...): 
 
 rem --- How many clips at once: depends on your RAM ---
 for /f %%r in ('powershell -NoProfile -Command "[math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory/1GB)"') do set RAM=%%r

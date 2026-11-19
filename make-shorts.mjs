@@ -1,38 +1,51 @@
 #!/usr/bin/env node
-// make-shorts: one Twitch VOD link in, N captioned 1080x1920 YouTube Shorts out, each with title/description/tags.
+// make-shorts: one stream link in (Twitch VOD or ended YouTube live stream), N captioned 1080x1920
+// YouTube Shorts out, each with title/description/tags.
 //
-//   node make-shorts.mjs https://www.twitch.tv/videos/2932305259 [--count 30] [--min 35] [--max 60]
+//   node make-shorts.mjs <link> [--count 30] [--min 35] [--max 60] [--layout split|full] [--parallel 3]
+//
+//   Twitch:  https://www.twitch.tv/videos/2932305259
+//   YouTube: https://www.youtube.com/watch?v=XXXXXXXXXXX  (also youtu.be/..., youtube.com/live/...)
 //
 // Steps (each one is skipped if its output already exists, so you can re-run after a crash):
-//   1. Download the chat (TwitchDownloaderCLI)              -> runs/<id>/chat.json
-//   2. Find the loudest chat spikes (chat-clips.mjs)        -> runs/<id>/moments.json
-//   3. Download each moment in source quality, horizontal  -> runs/<id>/pieces/piece_XX.mp4
-//   4. OpenShorts (self-hosted, localhost:8000): vertical reframe + burned captions + title
-//   5. Gemini: YouTube description + tags
-//   6. Final files                                          -> runs/<id>/final/short_XX.mp4 + short_XX.txt + shorts.csv
+//   1. Download the chat (TwitchDownloaderCLI / yt-dlp live chat replay)  -> runs/<id>/chat.json
+//   2. Find the loudest chat spikes (chat-clips.mjs)                       -> runs/<id>/moments.json
+//   3. Download each moment in source quality, horizontal                 -> runs/<id>/pieces/piece_XX.mp4
+//   4. OpenShorts (self-hosted, localhost:8000): picks the best 35-60 s + burned captions + title
+//   5. Split screen (gameplay top, facecam bottom, captions on the seam) when the stream has a facecam
+//   6. Gemini: YouTube description + tags
+//   7. Final files                                                         -> runs/<id>/final/short_XX.mp4 + .txt + shorts.csv
 //
-// Needs: OpenShorts running (docker compose up -d in ./openshorts), GEMINI_API_KEY in ./openshorts/.env.
+// Needs: OpenShorts running (docker compose up -d backend in ./openshorts), GEMINI_API_KEY in ./openshorts/.env.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, copyFileSync, openAsBlob } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, copyFileSync, openAsBlob, createReadStream, unlinkSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { join, basename } from 'node:path';
+import { createInterface } from 'node:readline';
+import { join, basename, relative } from 'node:path';
 
 const HERE = import.meta.dirname;
 const args = process.argv.slice(2);
 const opt = (n, d) => { const i = args.indexOf(`--${n}`); return i >= 0 ? args[i + 1] : d; };
-const link = args.find((a) => /twitch\.tv\/videos\/\d+|^\d+$/.test(a));
-if (!link) { console.log('Usage: node make-shorts.mjs <twitch VOD link> [--count 30] [--min 35] [--max 60]'); process.exit(1); }
-const VOD = link.match(/(\d+)\s*$/)?.[1] ?? link.match(/videos\/(\d+)/)[1];
+const USAGE = 'Usage: node make-shorts.mjs <Twitch VOD link | YouTube live stream link> [--count 30] [--min 35] [--max 60] [--layout split|full]';
+const arg = args.find((a) => !a.startsWith('--') && /twitch\.tv\/videos\/\d+|^\d+$|youtube\.com|youtu\.be/.test(a));
+if (!arg) { console.log(USAGE); process.exit(1); }
+const ytId = arg.match(/(?:v=|youtu\.be\/|\/live\/|\/shorts\/|\/embed\/)([\w-]{11})/)?.[1];
+const PLATFORM = ytId ? 'YouTube' : 'Twitch';
+if (!ytId && !/twitch\.tv\/videos\/\d+|^\d+$/.test(arg)) { console.log('Could not read that link.\n' + USAGE); process.exit(1); }
+const VOD = ytId ?? (arg.match(/videos\/(\d+)/)?.[1] ?? arg.match(/^(\d+)$/)[1]);
+const YT_URL = ytId && `https://www.youtube.com/watch?v=${ytId}`;
 const COUNT = Number(opt('count', 30));
 const MIN = Number(opt('min', 35));
 const MAX = Number(opt('max', 60));
 const BEFORE = Number(opt('before', 40)); // piece = 40 s before the chat spike + 20 s after
 const AFTER = Number(opt('after', 20));
+const LAYOUT = opt('layout', 'split');    // split = gameplay top + facecam bottom (when there is a facecam); full = whole frame
 const API = opt('api', 'http://localhost:8000');
 const TDL = join(HERE, process.platform === 'win32' ? 'TwitchDownloaderCLI.exe' : 'TwitchDownloaderCLI');
 const OS_OUT = join(HERE, 'openshorts', 'output');
+const DOCKER = 'openshorts-backend'; // container_name in openshorts/docker-compose.yml; it mounts this folder at /host
 
-const RUN = join(HERE, 'runs', VOD);
+const RUN = join(HERE, 'runs', ytId ? `yt_${VOD}` : VOD);
 const PIECES = join(RUN, 'pieces'), FINAL = join(RUN, 'final');
 for (const d of [RUN, PIECES, FINAL]) mkdirSync(d, { recursive: true });
 const log = (...m) => console.log(new Date().toLocaleTimeString(), ...m);
@@ -40,21 +53,108 @@ const run = (cmd, a) => { const r = spawnSync(cmd, a, { stdio: ['ignore', 'ignor
 const hms = (s) => { s = Math.max(0, Math.round(s)); return `${Math.floor(s / 3600)}:${String(Math.floor(s / 60) % 60).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const pad = (k) => String(k).padStart(2, '0');
+const inBox = (p) => '/host/' + relative(HERE, p).split('\\').join('/'); // host path -> the same file inside the OpenShorts container
+const dockerExec = (a, opts = {}) => spawnSync('docker', ['exec', '-w', '/app', DOCKER, ...a], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, ...opts });
+const COOKIES = join(HERE, 'youtube-cookies.txt');
+const ytdlp = (a, opts) => dockerExec(['yt-dlp', '--no-warnings', ...(existsSync(COOKIES) ? ['--cookies', inBox(COOKIES)] : []), ...a], opts);
 
 const envFile = join(HERE, 'openshorts', '.env');
 const GEMINI = process.env.GEMINI_API_KEY ?? (existsSync(envFile) && readFileSync(envFile, 'utf8').match(/^GEMINI_API_KEY=(.+)$/m)?.[1].trim());
 
 // 1. chat
 const chatFile = join(RUN, 'chat.json');
+if (!existsSync(chatFile) && ytId) await youtubeChat();
 if (!existsSync(chatFile)) {
   log('Downloading chat (big streams take 10-30 min)...');
-  if (!run(TDL, ['chatdownload', '--id', VOD, '-o', chatFile, '--collision', 'Overwrite'])) throw new Error('chat download failed');
+  if (!run(TDL, ['chatdownload', '--id', VOD, '-o', chatFile, '--collision', 'Overwrite'])) throw new Error('chat download failed. Is the link right and the video public?');
 }
+
+// YouTube: the live chat replay of an ended stream, rewritten in the shape TwitchDownloader writes
+// (comments[].content_offset_seconds + streamer + video), so every later step is shared.
+async function youtubeChat() {
+  await waitForOpenShorts(); // yt-dlp runs inside the OpenShorts container
+  log('Reading the YouTube video info...');
+  const r = ytdlp(['-J', '--no-playlist', YT_URL]);
+  let info;
+  try { info = JSON.parse(r.stdout); } catch {
+    throw new Error(`YouTube refused the request: ${(r.stderr || '').trim().split('\n').pop()}\n(If it mentions signing in or a bot check, see "YouTube cookies" in README.md.)`);
+  }
+  if (['is_live', 'is_upcoming', 'post_live'].includes(info.live_status)) {
+    throw new Error(`This stream is ${info.live_status === 'is_upcoming' ? 'not started yet' : 'still live or still processing'}. Run this again after it has ended.`);
+  }
+  const raw = join(RUN, 'src.live_chat.json');
+  if (!existsSync(raw)) {
+    log('Downloading the live chat replay (big streams take 10-40 min)...');
+    ytdlp(['--skip-download', '--no-playlist', '--write-subs', '--sub-langs', 'live_chat', '-o', inBox(join(RUN, 'src')), YT_URL], { stdio: ['ignore', 'ignore', 'inherit'] });
+  }
+  const handle = info.uploader_id?.startsWith('@') ? info.uploader_id : (info.channel_url ?? '').replace(/^https?:\/\/(www\.)?youtube\.com\//, '');
+  const meta = (comments, source) => JSON.stringify({
+    platform: 'youtube', source,
+    streamer: { name: info.channel ?? info.uploader ?? 'the streamer', login: handle },
+    video: { title: info.title ?? '', length: info.duration ?? 0, chapters: [] },
+    comments,
+  });
+  if (!existsSync(raw)) {
+    // Many streams have chat replay switched off. Backup signal: loudness. When something big happens the
+    // streamer yells, so a 10 s stretch much louder than the 5 minutes around it is a moment.
+    log('No chat replay on this video: finding the moments by loudness instead (downloading the audio only)...');
+    loudnessMoments(info.duration ?? 0);
+    writeFileSync(chatFile, meta([], 'audio'));
+    return;
+  }
+  const comments = [];
+  for await (const line of createInterface({ input: createReadStream(raw, 'utf8'), crlfDelay: Infinity })) {
+    if (!/liveChat(Text|Paid)MessageRenderer/.test(line)) continue; // real messages and Super Chats, not system notices
+    try {
+      const t = Number(JSON.parse(line).replayChatItemAction?.videoOffsetTimeMsec) / 1000;
+      if (t >= 0) comments.push({ content_offset_seconds: t });
+    } catch { /* partial line */ }
+  }
+  if (!comments.length) throw new Error('The chat replay is empty.');
+  writeFileSync(chatFile, meta(comments, 'chat'));
+  log(`${comments.length} chat messages.`);
+}
+
+// Loudness per 10 s of the whole stream (audio only: a few hundred MB even for 10 hours), scored like
+// chat-clips.mjs scores chat: how much louder than the median of the 5 minutes around it.
+function loudnessMoments(length) {
+  const BUCKET = 10, AROUND = 30, GAP = 90;
+  if (!readdirSync(RUN).some((f) => f.startsWith('audio.'))) {
+    const r = ytdlp(['--no-playlist', '-f', 'ba[abr<=80]/wa/ba', '-o', inBox(join(RUN, 'audio.%(ext)s')), YT_URL]);
+    if (r.status !== 0) throw new Error(`audio download failed: ${(r.stderr || '').trim().split('\n').pop()}`);
+  }
+  const audio = join(RUN, readdirSync(RUN).find((f) => f.startsWith('audio.') && !f.endsWith('.part')));
+  log('Measuring loudness...');
+  const r = dockerExec(['ffmpeg', '-v', 'error', '-i', inBox(audio), '-af',
+    `aformat=channel_layouts=mono,aresample=8000,asetnsamples=n=${8000 * BUCKET}:p=0,astats=metadata=1:reset=1,ametadata=print:key=lavfi.astats.Overall.RMS_level:file=-`, '-f', 'null', '-']);
+  const db = [...(r.stdout || '').matchAll(/RMS_level=(\S+)/g)].map((x) => { const v = Number(x[1]); return Number.isFinite(v) ? v : -90; });
+  if (db.length < 60) throw new Error('This video has no chat replay and its audio could not be measured, so there is no way to find moments.');
+  const amp = db.map((d) => 10 ** (d / 20));
+  const median = (a) => { const s = [...a].sort((x, y) => x - y); return s[Math.floor(s.length / 2)] ?? 0; };
+  const score = amp.map((v, i) => v / (median(amp.slice(Math.max(0, i - AROUND), i + AROUND + 1)) || 1e-9));
+  const order = score.map((_, i) => i).sort((a, b) => score[b] - score[a]);
+  const peaks = [];
+  for (const i of order) {
+    if (peaks.length >= COUNT) break;
+    const t = i * BUCKET;
+    if (db[i] < -45 || t < 120) continue; // silence, or the stream's opening minutes
+    if (peaks.some((p) => Math.abs(p.t - t) < GAP)) continue;
+    peaks.push({ t, msgs: 0, score: +score[i].toFixed(1), start: Math.max(0, Math.min(t - BEFORE, (length || 1e9) - BEFORE - AFTER)), end: 0 });
+    peaks[peaks.length - 1].end = peaks[peaks.length - 1].start + BEFORE + AFTER;
+  }
+  peaks.sort((a, b) => a.t - b.t);
+  writeFileSync(join(RUN, 'moments.json'), JSON.stringify(peaks, null, 2));
+  log(`${peaks.length} loud moments found.`);
+}
+
 const chatMeta = JSON.parse(readFileSync(chatFile, 'utf8'), (k, v) => (k === 'comments' ? undefined : v));
 const streamer = chatMeta.streamer?.name ?? 'the streamer';
 const streamerLogin = chatMeta.streamer?.login ?? streamer.toLowerCase();
+const tagName = streamer.replace(/\W/g, '').toLowerCase();
+const creditUrl = PLATFORM === 'YouTube' ? `youtube.com/${streamerLogin}` : `twitch.tv/${streamerLogin}`;
 const vodTitle = chatMeta.video?.title ?? '';
-// The game of the longest chapter (streams often start in "Just Chatting").
+const SIGNAL = chatMeta.source === 'audio' ? 'audio' : 'chat'; // what picked the moments
+// The game of the longest chapter (streams often start in "Just Chatting"). YouTube has none: Gemini reads the title.
 const chapters = chatMeta.video?.chapters ?? [];
 const game = chapters.length ? [...chapters].sort((a, b) => b.lengthMilliseconds - a.lengthMilliseconds)[0].gameDisplayName : (chatMeta.video?.game ?? '');
 
@@ -62,7 +162,16 @@ const game = chapters.length ? [...chapters].sort((a, b) => b.lengthMilliseconds
 const momentsFile = join(RUN, 'moments.json');
 if (!existsSync(momentsFile)) {
   log(`Finding top ${COUNT} chat spikes...`);
-  run('node', [join(HERE, 'chat-clips.mjs'), chatFile, '--top', String(COUNT), '--before', String(BEFORE), '--after', String(AFTER), '--gap', '90', '--out', RUN]);
+  run('node', [join(HERE, 'chat-clips.mjs'), chatFile, '--top', String(COUNT + 5), '--before', String(BEFORE), '--after', String(AFTER), '--gap', '90', '--out', RUN]);
+  // Drop the opening 2 minutes (everyone saying hi is a spike, not a moment), give every piece the full
+  // BEFORE+AFTER length (OpenShorts needs 45 s+ to cut from), keep the best COUNT, in stream order.
+  const len = chatMeta.video?.length || Infinity;
+  const ms = JSON.parse(readFileSync(momentsFile, 'utf8'))
+    .filter((m) => m.t >= 120)
+    .sort((a, b) => b.score - a.score).slice(0, COUNT)
+    .map((m) => { const start = Math.max(0, Math.min(m.t - BEFORE, len - BEFORE - AFTER)); return { ...m, start, end: start + BEFORE + AFTER }; })
+    .sort((a, b) => a.t - b.t);
+  writeFileSync(momentsFile, JSON.stringify(ms, null, 2));
 }
 const moments = JSON.parse(readFileSync(momentsFile, 'utf8'));
 log(`${moments.length} moments. Streamer: ${streamer}. Game: ${game || '?'}`);
@@ -74,8 +183,40 @@ async function downloadPieces() {
     const out = pieceOf(i + 1);
     if (existsSync(out) && statSync(out).size > 1e6) continue;
     log(`Downloading piece ${i + 1}/${moments.length} (${hms(m.start)}-${hms(m.end)})`);
-    if (!run(TDL, ['videodownload', '--id', VOD, '-b', hms(m.start), '-e', hms(m.end), '-o', out, '--collision', 'Overwrite'])) log(`  piece ${i + 1} FAILED`);
+    let ok;
+    if (ytId) {
+      // 1080p max, H.264 first (OpenCV in the container decodes it everywhere; AV1 it may not).
+      const r = ytdlp(['--no-playlist', '--download-sections', `*${m.start}-${m.end}`,
+        '-f', 'bv*[height<=1080][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=1080][vcodec!^=av01]+ba/b[height<=1080]/b',
+        '--merge-output-format', 'mp4', '--force-overwrites', '-o', inBox(out), YT_URL]);
+      ok = r.status === 0 && existsSync(out);
+      if (!ok) log(`  ${(r.stderr || '').trim().split('\n').pop()}`);
+    } else {
+      ok = run(TDL, ['videodownload', '--id', VOD, '-b', hms(m.start), '-e', hms(m.end), '-o', out, '--collision', 'Overwrite']);
+    }
+    if (!ok) log(`  piece ${i + 1} FAILED`);
   }
+}
+
+// 3b. split screen: where is the streamer's facecam? Found once for the whole stream (it stays put),
+// from frames of the first pieces, by split_render.py inside the OpenShorts container.
+const camFile = join(RUN, 'cam.json');
+let camPromise = null;
+function streamCam() {
+  if (LAYOUT !== 'split') return Promise.resolve(null);
+  return (camPromise ??= (async () => {
+    if (existsSync(camFile)) return JSON.parse(readFileSync(camFile, 'utf8')).box;
+    const want = Math.min(8, moments.length);
+    const have = () => moments.map((_, i) => pieceOf(i + 1)).filter((p) => existsSync(p) && statSync(p).size > 1e6);
+    while (have().length < want && !dlDone) await sleep(5000);
+    const ps = have().slice(0, want);
+    if (!ps.length) return null;
+    log('Looking for the facecam (split screen)...');
+    const r = dockerExec(['python', 'split_render.py', 'detect', inBox(camFile), ...ps.map(inBox)]);
+    const box = existsSync(camFile) ? JSON.parse(readFileSync(camFile, 'utf8')).box : null;
+    log(box ? `Facecam found at ${box.join(',')}: shorts will be split screen.` : `No facecam found${r.status ? ` (${(r.stderr || '').trim().split('\n').pop()})` : ''}: shorts keep the full frame.`);
+    return box;
+  })());
 }
 
 // 4. OpenShorts
@@ -115,21 +256,36 @@ async function openshorts(piece) {
   }
   if (!video) throw new Error(`no clip from job ${job} (status ${st.status}): ${(st.logs ?? []).slice(-5).join(' | ')}`);
   const words = (meta.transcript?.segments ?? []).filter((s) => s.end >= (clip.start ?? 0) && s.start <= (clip.end ?? 1e9)).map((s) => s.text).join(' ');
-  return { video, clip, transcript: words.slice(0, 3000) };
+  return { video, clip, transcript: words.slice(0, 3000), dir };
+}
+
+// Re-render the clip OpenShorts picked as split screen (same window, same captions moved onto the seam,
+// same loudness-normalised audio). Returns the new file, or null to keep OpenShorts' full-frame clip.
+async function splitScreen(piece, r, out) {
+  const box = await streamCam();
+  if (!box) return null;
+  const ass = existsSync(r.dir) && readdirSync(r.dir).find((f) => /^autosubs_.*\.ass$/.test(f));
+  if (!ass || r.clip.start == null || r.clip.end == null) return null;
+  const res = dockerExec(['python', 'split_render.py', inBox(piece), String(r.clip.start), String(r.clip.end),
+    inBox(join(r.dir, ass)), inBox(r.video), inBox(out), box.join(',')]);
+  if (res.status === 0 && existsSync(out)) return out;
+  log(res.status === 2 ? '  facecam hidden in this clip: keeping the full frame' : `  split screen failed, keeping the full frame: ${(res.stderr || '').trim().split('\n').pop()}`);
+  return null;
 }
 
 // 5. YouTube description + tags
 async function ytDetails(clip, transcript) {
   const fallback = {
     title: clip.video_title_for_youtube_short ?? `${streamer} ${game} moment`,
-    description: `${clip.video_description_for_tiktok ?? ''}\n\nCredit: ${streamer} (twitch.tv/${streamerLogin})\n\n#shorts #${streamerLogin} ${game ? '#' + game.replace(/\W/g, '').toLowerCase() : ''}`.trim(),
-    tags: [streamer, streamerLogin, game, `${streamer} ${game}`, 'twitch clips', 'shorts'].filter(Boolean),
+    description: `${clip.video_description_for_tiktok ?? ''}\n\nCredit: ${streamer} (${creditUrl})\n\n#shorts #${tagName} ${game ? '#' + game.replace(/\W/g, '').toLowerCase() : ''}`.trim(),
+    tags: [streamer, game, game && `${streamer} ${game}`, `${PLATFORM.toLowerCase()} clips`, 'stream highlights', 'shorts'].filter(Boolean),
   };
   if (!GEMINI) return fallback;
-  const prompt = `You write YouTube Shorts metadata for a clip from ${streamer}'s Twitch stream${game ? ` playing ${game}` : ''} (stream title: "${vodTitle}").
+  const prompt = `You write YouTube Shorts metadata for a clip from ${streamer}'s ${PLATFORM} live stream${game ? ` playing ${game}` : ''} (stream title: "${vodTitle}"${game ? '' : '; work out the game or topic from it'}).
+Name the game exactly as ${game ? 'given here' : 'the stream title does'} (same version number: "GTA 6" stays "GTA 6", never an older game), in the title, hashtags and tags alike.
 Suggested title from another tool: "${clip.video_title_for_youtube_short ?? ''}".
 What is said in the clip: """${transcript || '(no speech)'}"""
-Return JSON: {"title": string (max 90 chars, curiosity hook, no clickbait lies, include ${streamer}), "description": string (2-3 short lines describing the moment, then the line "Credit: ${streamer} - twitch.tv/${streamerLogin}", then 3-5 hashtags including #shorts), "tags": array of 12-18 relevant search tags (strings, no #)}`;
+Return JSON: {"title": string (max 90 chars, curiosity hook, no clickbait lies, include ${streamer}), "description": string (2-3 short lines describing the moment, then the line "Credit: ${streamer} - ${creditUrl}", then 3-5 hashtags including #shorts), "tags": array of 12-18 relevant search tags (strings, no #)}`;
   try {
     const r = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent', {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-goog-api-key': GEMINI },
@@ -165,18 +321,27 @@ async function makeShort(i, m) {
   try {
     log(`short ${k}/${moments.length}: OpenShorts...`);
     let r, p;
-    for (let attempt = 1; ; attempt++) { // never save a short under 30 s
-      r = await openshorts(pieceOf(k)); p = probe(r.video);
+    for (let attempt = 1; ; attempt++) { // never save a short under 30 s; retry once if the AI returns nothing
+      try { r = await openshorts(pieceOf(k)); } catch (e) {
+        if (attempt >= 2) throw e;
+        log(`short ${k}: OpenShorts returned no clip, retrying`);
+        continue;
+      }
+      p = probe(r.video);
       if (p.dur >= 30) break;
       if (attempt >= 2) throw new Error(`clip only ${Math.round(p.dur)} s after ${attempt} tries, not saved`);
       log(`short ${k}: came out ${Math.round(p.dur)} s, retrying`);
     }
-    const { video, clip, transcript } = r;
-    copyFileSync(video, mp4);
+    const { clip, transcript } = r;
+    let src = r.video, layout = 'full';
+    const split = await splitScreen(pieceOf(k), r, join(FINAL, `short_${pad(k)}.split.tmp.mp4`));
+    if (split) { const q = probe(split); if (q.dur >= 30) { p = q; src = split; layout = 'split'; } }
+    copyFileSync(src, mp4);
+    if (split && existsSync(split)) unlinkSync(split);
     const d = await ytDetails(clip, transcript);
-    const info = { ...d, stream_time: hms(m.t), chat_score: m.score, width: p.w, height: p.h, seconds: Math.round(p.dur) };
+    const info = { ...d, stream_time: hms(m.t), chat_score: m.score, width: p.w, height: p.h, seconds: Math.round(p.dur), layout };
     writeFileSync(txt + '.json', JSON.stringify(info, null, 2));
-    writeFileSync(txt, `TITLE:\n${d.title}\n\nDESCRIPTION:\n${d.description}\n\nTAGS:\n${d.tags.join(', ')}\n\n---\nFrom ${streamer}'s stream at ${hms(m.t)} (chat ${m.score}x louder than normal). ${p.w}x${p.h}, ${Math.round(p.dur)} s.\n`);
+    writeFileSync(txt, `TITLE:\n${d.title}\n\nDESCRIPTION:\n${d.description}\n\nTAGS:\n${d.tags.join(', ')}\n\n---\nFrom ${streamer}'s stream at ${hms(m.t)} (${SIGNAL} ${m.score}x louder than normal). ${p.w}x${p.h}, ${Math.round(p.dur)} s, ${layout === 'split' ? 'split screen' : 'full frame'}.\n`);
     rows.push({ k, m, info });
     log(`short ${k}: done ${p.w}x${p.h} ${Math.round(p.dur)}s - ${d.title}`);
   } catch (e) { log(`short ${k}: FAILED ${e.message}`); }

@@ -1,13 +1,14 @@
-# Twitch to YouTube Shorts
+# Twitch & YouTube Streams to Shorts
 
-Give it a Twitch stream link. It gives you back up to **30 finished YouTube Shorts**:
+Give it a **Twitch** stream link or a finished **YouTube** live stream link. It gives you back up to **30 finished YouTube Shorts**:
 
 - Full quality: 1080x1920 (vertical, 1080p)
+- **Split screen:** gameplay on top, the streamer's facecam below, captions in the middle
 - 35 to 60 seconds each
 - Captions burned into the video, no watermark
 - A ready-made **title, description and tags** for every short
 
-**How it finds the good moments:** it reads the stream's chat. When chat suddenly goes crazy, something funny or hype just happened, so those moments become your shorts.
+**How it finds the good moments:** it reads the stream's chat. When chat suddenly goes crazy, something funny or hype just happened, so those moments become your shorts. If a YouTube stream has its chat replay turned off, it listens for the loudest moments instead (the streamer yelling, big reactions).
 
 ---
 
@@ -106,12 +107,12 @@ git clone https://github.com/ammar-2408/twitch-to-shorts.git
 2. Open the project folder and double-click **`start.bat`**.
    - If Windows shows **"Windows protected your PC"**, click **More info**, then **Run anyway**.
 3. **First time only:** it asks for your Gemini key. Paste it (right-click) and press **Enter**. It's saved, so it won't ask again.
-4. It asks for the Twitch link. Paste it and press **Enter** (see the next section for which link).
+4. It asks for the stream link. Paste it and press **Enter** (see the next section for which link).
 5. Leave the window open and let it work. You can use your PC, but it will be slower than usual.
 
 > **The very first run takes an extra 15 to 30 minutes** because Docker builds OpenShorts. Every run after that starts right away.
 
-### Which Twitch link to use
+### Which link to use: Twitch
 
 It needs a **video link**, which looks like this:
 
@@ -129,6 +130,23 @@ A stream that is **still live** works too. It will show at the top of the Videos
 
 **These will NOT work:** a channel link like `twitch.tv/kaicenat`, or a clip link like `clips.twitch.tv/...`.
 
+### Which link to use: YouTube
+
+Use the link of a live stream that has **ended**. Any of these work:
+
+```
+https://www.youtube.com/watch?v=3QjXNSf6keg
+https://youtu.be/3QjXNSf6keg
+https://www.youtube.com/live/3QjXNSf6keg
+```
+
+How to find it: go to the channel, click the **Live** tab, open a past stream, and copy the link from the address bar (or click **Share** > **Copy**).
+
+Good to know:
+- The stream must have **finished**. A stream that is still live won't work yet. Try again after it ends.
+- It must be **public**. Members-only and private streams won't work.
+- **Best results:** streams with **chat replay** (you can see the chat replaying next to the video). Without chat replay it still works, but it finds moments by loudness, which is a bit less accurate than chat.
+
 ## Step 6: Get your shorts
 
 When the window says **Finished**, open this folder inside the project:
@@ -137,7 +155,9 @@ When the window says **Finished**, open this folder inside the project:
 runs\<video number>\final\
 ```
 
-(The video number is the number at the end of the Twitch link.)
+(For Twitch, the video number is the number at the end of the link. For YouTube the folder is `yt_` plus the video id, for example `runs\yt_3QjXNSf6keg\final\`.)
+
+**Split screen:** if the streamer has a facecam, every short is split screen: gameplay on top, the streamer below, captions on the line in the middle. If a clip has no facecam on screen (for example a full-screen cutscene), that short keeps the full picture instead. Each short's `.txt` says which layout it got.
 
 Inside you'll find:
 
@@ -151,7 +171,7 @@ Inside you'll find:
 
 ## How long does it take?
 
-- Downloading the chat: 5 to 30 minutes (longer for big streamers)
+- Downloading the chat: 5 to 30 minutes (longer for big streamers). YouTube chat replays can take up to 40 minutes. Without chat replay, the audio download and check take about 5 minutes
 - Making 30 shorts: about 2 to 4 hours, depending on your PC
 
 You don't need to watch it. **`start.bat` stops your PC from going to sleep** until it's done. Keep a laptop plugged in.
@@ -187,6 +207,9 @@ Tips:
 | `OpenShorts failed to start` | Restart Docker Desktop (right-click its icon near the clock > Restart) and try again |
 | Chat download seems stuck | It's not. Big streams have millions of messages. Give it up to 30 minutes |
 | `chat download failed` | Check the link is a `twitch.tv/videos/...` link and the video is public (not subscriber-only) |
+| `This stream is still live or still processing` | The YouTube stream hasn't ended yet. Run it again after it ends |
+| `YouTube refused the request` / "Sign in to confirm you're not a bot" | YouTube wants a login. See **YouTube cookies** below |
+| Shorts came out full frame, not split screen | The streamer has no facecam, or it's hidden in those clips. That's expected |
 | One short says `FAILED` | Run `start.bat` again with the same link. It retries only the missing ones |
 | Wrong Gemini key / key stopped working | Delete the file `openshorts\.env`, run `start.bat` again, and paste a new key |
 | PC is very slow | Normal while it's working. It uses most of your processor |
@@ -213,12 +236,25 @@ node make-shorts.mjs https://www.twitch.tv/videos/2932305259 --count 30 --min 35
 | `--min` | Shortest length in seconds | 35 |
 | `--max` | Longest length in seconds | 60 |
 | `--parallel` | How many shorts to make at the same time (each needs about 2 GB RAM) | 3 |
+| `--layout` | `split` (gameplay top, facecam bottom when there is one) or `full` (the whole picture, no split) | split |
 
-OpenShorts must be running first. `start.bat` does this for you, or run `docker compose up -d --build backend` inside the `openshorts` folder.
+The link can be a Twitch video link or a YouTube link. OpenShorts must be running first. `start.bat` does this for you, or run `docker compose up -d --build backend` inside the `openshorts` folder.
+
+### YouTube cookies (only if YouTube blocks downloads)
+
+Sometimes YouTube asks to "confirm you're not a bot". Then it needs your browser's YouTube login:
+
+1. In Chrome, install the extension **"Get cookies.txt LOCALLY"**.
+2. Go to **youtube.com** (logged in), click the extension, and click **Export**.
+3. Rename the downloaded file to **`youtube-cookies.txt`** and put it in the project folder (next to `start.bat`).
+4. Run `start.bat` again.
+
+This file is your login. **Never share it or upload it.** It's already excluded from GitHub. A spare Google account is safest.
 
 ## Credits
 
-- [OpenShorts](https://github.com/mutonby/openshorts) (MIT license): vertical framing and captions. A slightly modified copy is included in `openshorts/` (clips are always kept at least the minimum length).
+- [OpenShorts](https://github.com/mutonby/openshorts) (MIT license): picks the best part of each moment, transcribes it and makes the captions. A slightly modified copy is included in `openshorts/` (clips are always kept at least the minimum length; `split_render.py` adds the split-screen layout).
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp) (inside the OpenShorts container): downloads YouTube chat replays, audio and clips.
 - [TwitchDownloader](https://github.com/lay295/TwitchDownloader) (MIT license): downloads the chat and video. See `COPYRIGHT.txt` and `THIRD-PARTY-LICENSES.txt`.
 - `chat-clips.mjs`: the chat spike finder, from the Chat Clip Finder guide.
 - The clips belong to the streamers. Always give them credit.

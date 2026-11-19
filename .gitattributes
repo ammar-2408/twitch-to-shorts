@@ -1,0 +1,7 @@
+# Scripts that run inside the Linux container must keep LF line endings,
+# even when the repo is cloned on Windows (core.autocrlf=true).
+* text=auto
+*.sh text eol=lf
+*.py text eol=lf
+openshorts/bin/* text eol=lf
+*.bat text eol=crlf

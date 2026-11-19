@@ -8,6 +8,8 @@ services:
       - .:/app
       - /app/__pycache__
       - ./output:/app/output
+      # make-shorts.mjs: pieces/finals in ../runs (split-screen render, YouTube downloads)
+      - ..:/host
     restart: unless-stopped
 
   frontend:
