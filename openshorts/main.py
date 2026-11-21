@@ -2667,6 +2667,16 @@ def get_visual_clips(video_path, video_duration, language="en", viewer_clips=Non
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
         clean.sort(key=lambda c: c["start"])
+        # Local patch: the same hard length floor as the transcript path. The
+        # vision path never enforced min_secs, so a clip from a quiet stretch
+        # came out under the asked minimum.
+        vd = float(video_duration or 0)
+        for sh in clean:
+            if vd and (sh["end"] - sh["start"]) < v_min_secs:
+                want = min(float(v_min_secs), vd)
+                mid = (sh["start"] + sh["end"]) / 2
+                ns = max(0.0, min(mid - want / 2, vd - want))
+                sh["start"], sh["end"] = round(ns, 3), round(ns + want, 3)
         clean = trim_to_best(dedupe_overlapping(clean), v_max_clips)
 
         if not clean:

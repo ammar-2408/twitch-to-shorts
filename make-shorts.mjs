@@ -18,8 +18,8 @@
 //
 // Needs: OpenShorts running (docker compose up -d backend in ./openshorts), GEMINI_API_KEY in ./openshorts/.env.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, copyFileSync, openAsBlob, createReadStream, unlinkSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, copyFileSync, openAsBlob, createReadStream, unlinkSync, rmSync, renameSync } from 'node:fs';
+import { spawnSync, spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { join, basename, relative } from 'node:path';
 
@@ -40,6 +40,8 @@ const MAX = Number(opt('max', 60));
 const BEFORE = Number(opt('before', 40)); // piece = 40 s before the chat spike + 20 s after
 const AFTER = Number(opt('after', 20));
 const LAYOUT = opt('layout', 'split');    // split = gameplay top + facecam bottom (when there is a facecam); full = whole frame
+const INTRO = opt('intro', 'on') !== 'off'; // AI voiceover hook at the start of every short
+const VOICE = opt('voice', 'en-US-AndrewNeural'); // any edge-tts voice, e.g. en-US-GuyNeural, en-US-RogerNeural
 const API = opt('api', 'http://localhost:8000');
 const TDL = join(HERE, process.platform === 'win32' ? 'TwitchDownloaderCLI.exe' : 'TwitchDownloaderCLI');
 const OS_OUT = join(HERE, 'openshorts', 'output');
@@ -56,6 +58,7 @@ const pad = (k) => String(k).padStart(2, '0');
 const inBox = (p) => '/host/' + relative(HERE, p).split('\\').join('/'); // host path -> the same file inside the OpenShorts container
 const dockerExec = (a, opts = {}) => spawnSync('docker', ['exec', '-w', '/app', DOCKER, ...a], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, ...opts });
 const COOKIES = join(HERE, 'youtube-cookies.txt');
+const cookieArgs = () => (existsSync(COOKIES) ? ['--cookies', inBox(COOKIES)] : []);
 const ytdlp = (a, opts) => dockerExec(['yt-dlp', '--no-warnings', ...(existsSync(COOKIES) ? ['--cookies', inBox(COOKIES)] : []), ...a], opts);
 
 const envFile = join(HERE, 'openshorts', '.env');
@@ -74,14 +77,19 @@ if (!existsSync(chatFile)) {
 async function youtubeChat() {
   await waitForOpenShorts(); // yt-dlp runs inside the OpenShorts container
   log('Reading the YouTube video info...');
-  const r = ytdlp(['-J', '--no-playlist', YT_URL]);
+  // only the fields needed: a long stream's full -J listing is ~1 GB
+  const r = ytdlp(['--no-playlist', '-O', '%(.{id,title,channel,uploader,uploader_id,channel_url,duration,live_status})j', YT_URL]);
   let info;
   try { info = JSON.parse(r.stdout); } catch {
     throw new Error(`YouTube refused the request: ${(r.stderr || '').trim().split('\n').pop()}\n(If it mentions signing in or a bot check, see "YouTube cookies" in README.md.)`);
   }
-  if (['is_live', 'is_upcoming', 'post_live'].includes(info.live_status)) {
-    throw new Error(`This stream is ${info.live_status === 'is_upcoming' ? 'not started yet' : 'still live or still processing'}. Run this again after it has ended.`);
+  if (['is_live', 'is_upcoming'].includes(info.live_status)) {
+    throw new Error(`This stream is ${info.live_status === 'is_upcoming' ? 'not started yet' : 'still live'}. Run this again after it has ended.`);
   }
+  // Very long streams can stay "post_live" (still processing) for days. YouTube then serves them as numbered
+  // live segments, which yt-dlp cannot cut: ytlive.py fetches just the segments needed.
+  const segments = info.live_status === 'post_live';
+  if (segments) log('YouTube is still processing this stream: downloading it segment by segment.');
   const raw = join(RUN, 'src.live_chat.json');
   if (!existsSync(raw)) {
     log('Downloading the live chat replay (big streams take 10-40 min)...');
@@ -92,13 +100,14 @@ async function youtubeChat() {
     platform: 'youtube', source,
     streamer: { name: info.channel ?? info.uploader ?? 'the streamer', login: handle },
     video: { title: info.title ?? '', length: info.duration ?? 0, chapters: [] },
+    live_segments: segments,
     comments,
   });
   if (!existsSync(raw)) {
     // Many streams have chat replay switched off. Backup signal: loudness. When something big happens the
     // streamer yells, so a 10 s stretch much louder than the 5 minutes around it is a moment.
     log('No chat replay on this video: finding the moments by loudness instead (downloading the audio only)...');
-    loudnessMoments(info.duration ?? 0);
+    loudnessMoments(info.duration ?? 0, segments);
     writeFileSync(chatFile, meta([], 'audio'));
     return;
   }
@@ -117,17 +126,28 @@ async function youtubeChat() {
 
 // Loudness per 10 s of the whole stream (audio only: a few hundred MB even for 10 hours), scored like
 // chat-clips.mjs scores chat: how much louder than the median of the 5 minutes around it.
-function loudnessMoments(length) {
+function loudnessMoments(length, segments) {
   const BUCKET = 10, AROUND = 30, GAP = 90;
-  if (!readdirSync(RUN).some((f) => f.startsWith('audio.'))) {
-    const r = ytdlp(['--no-playlist', '-f', 'ba[abr<=80]/wa/ba', '-o', inBox(join(RUN, 'audio.%(ext)s')), YT_URL]);
+  if (!readdirSync(RUN).some((f) => f.startsWith('audio.') && !f.endsWith('.part'))) {
+    const r = segments
+      ? dockerExec(['python', 'ytlive.py', 'audio', YT_URL, inBox(join(RUN, 'audio.m4a')), String(length), ...cookieArgs()])
+      : ytdlp(['--no-playlist', '-f', 'ba[abr<=80]/wa/ba', '-o', inBox(join(RUN, 'audio.%(ext)s')), YT_URL]);
     if (r.status !== 0) throw new Error(`audio download failed: ${(r.stderr || '').trim().split('\n').pop()}`);
   }
   const audio = join(RUN, readdirSync(RUN).find((f) => f.startsWith('audio.') && !f.endsWith('.part')));
   log('Measuring loudness...');
-  const r = dockerExec(['ffmpeg', '-v', 'error', '-i', inBox(audio), '-af',
-    `aformat=channel_layouts=mono,aresample=8000,asetnsamples=n=${8000 * BUCKET}:p=0,astats=metadata=1:reset=1,ametadata=print:key=lavfi.astats.Overall.RMS_level:file=-`, '-f', 'null', '-']);
-  const db = [...(r.stdout || '').matchAll(/RMS_level=(\S+)/g)].map((x) => { const v = Number(x[1]); return Number.isFinite(v) ? v : -90; });
+  // Windows' own ffmpeg (from step 1 of the README), reading the file straight from disk: through Docker's
+  // drive link, an audio file joined from thousands of segments took hours instead of minutes.
+  const r = spawnSync('ffmpeg', ['-v', 'error', '-i', audio, '-af',
+    `aformat=channel_layouts=mono,aresample=8000,asetnsamples=n=${8000 * BUCKET}:p=0,astats=metadata=1:reset=1,ametadata=print:key=lavfi.astats.Overall.RMS_level:file=-`, '-f', 'null', '-'],
+    { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
+  // bucket by timestamp, so a missing segment leaves a gap instead of shifting every later moment
+  const db = [];
+  for (const x of (r.stdout || '').matchAll(/pts_time:(\S+)\s+lavfi\.astats\.Overall\.RMS_level=(\S+)/g)) {
+    const v = Number(x[2]);
+    db[Math.floor(Number(x[1]) / BUCKET)] = Number.isFinite(v) ? v : -90;
+  }
+  for (let i = 0; i < db.length; i++) if (db[i] === undefined) db[i] = -90;
   if (db.length < 60) throw new Error('This video has no chat replay and its audio could not be measured, so there is no way to find moments.');
   const amp = db.map((d) => 10 ** (d / 20));
   const median = (a) => { const s = [...a].sort((x, y) => x - y); return s[Math.floor(s.length / 2)] ?? 0; };
@@ -178,23 +198,35 @@ log(`${moments.length} moments. Streamer: ${streamer}. Game: ${game || '?'}`);
 
 // 3. pieces (source quality, horizontal; OpenShorts does the vertical framing)
 const pieceOf = (k) => join(PIECES, `piece_${pad(k)}.mp4`);
+// Asynchronous: the downloads must not block OpenShorts from starting on the pieces already there
+// (spawnSync here held every short back until all pieces were downloaded).
+const spawnAsync = (cmd, a) => new Promise((res) => {
+  const p = spawn(cmd, a, { stdio: ['ignore', 'ignore', 'pipe'] });
+  let stderr = '';
+  p.stderr.on('data', (d) => { stderr = (stderr + d).slice(-4000); });
+  p.on('close', (status) => res({ status, stderr }));
+  p.on('error', (e) => res({ status: -1, stderr: String(e) }));
+});
 async function downloadPieces() {
   for (const [i, m] of moments.entries()) {
     const out = pieceOf(i + 1);
     if (existsSync(out) && statSync(out).size > 1e6) continue;
     log(`Downloading piece ${i + 1}/${moments.length} (${hms(m.start)}-${hms(m.end)})`);
-    let ok;
-    if (ytId) {
+    let r;
+    if (ytId && chatMeta.live_segments) {
+      // written under a temporary name and renamed, so a short never picks up a half-written piece
+      const tmp = out.replace(/\.mp4$/, '.dl.mp4');
+      r = await spawnAsync('docker', ['exec', '-w', '/app', DOCKER, 'python', 'ytlive.py', 'piece', YT_URL, String(m.start), String(m.end), inBox(tmp), '--height', '1440', ...cookieArgs()]);
+      if (r.status === 0 && existsSync(tmp)) renameSync(tmp, out);
+    } else if (ytId) {
       // 1080p max, H.264 first (OpenCV in the container decodes it everywhere; AV1 it may not).
-      const r = ytdlp(['--no-playlist', '--download-sections', `*${m.start}-${m.end}`,
-        '-f', 'bv*[height<=1080][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=1080][vcodec!^=av01]+ba/b[height<=1080]/b',
+      r = await spawnAsync('docker', ['exec', '-w', '/app', DOCKER, 'yt-dlp', '--no-warnings', ...cookieArgs(), '--no-playlist', '--download-sections', `*${m.start}-${m.end}`,
+        '-f', 'bv*[height<=1440][height>1080][vcodec!^=av01]+ba/bv*[height<=1080][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=1080][vcodec!^=av01]+ba/b[height<=1080]/b',
         '--merge-output-format', 'mp4', '--force-overwrites', '-o', inBox(out), YT_URL]);
-      ok = r.status === 0 && existsSync(out);
-      if (!ok) log(`  ${(r.stderr || '').trim().split('\n').pop()}`);
     } else {
-      ok = run(TDL, ['videodownload', '--id', VOD, '-b', hms(m.start), '-e', hms(m.end), '-o', out, '--collision', 'Overwrite']);
+      r = await spawnAsync(TDL, ['videodownload', '--id', VOD, '-b', hms(m.start), '-e', hms(m.end), '-o', out, '--collision', 'Overwrite']);
     }
-    if (!ok) log(`  piece ${i + 1} FAILED`);
+    if (!(r.status === 0 && existsSync(out))) log(`  piece ${i + 1} FAILED: ${(r.stderr || '').trim().split('\n').pop()}`);
   }
 }
 
@@ -259,6 +291,17 @@ async function openshorts(piece) {
   return { video, clip, transcript: words.slice(0, 3000), dir };
 }
 
+// OpenShorts keeps every job's working files and a copy of the uploaded piece (~120 MB a short):
+// drop them once the short is saved.
+function cleanJob(dir) {
+  try {
+    const job = basename(dir);
+    rmSync(dir, { recursive: true, force: true });
+    const up = join(HERE, 'openshorts', 'uploads');
+    if (existsSync(up)) for (const f of readdirSync(up)) if (f.startsWith(job)) rmSync(join(up, f), { force: true });
+  } catch { /* best effort */ }
+}
+
 // Re-render the clip OpenShorts picked as split screen (same window, same captions moved onto the seam,
 // same loudness-normalised audio). Returns the new file, or null to keep OpenShorts' full-frame clip.
 async function splitScreen(piece, r, out) {
@@ -285,17 +328,21 @@ async function ytDetails(clip, transcript) {
 Name the game exactly as ${game ? 'given here' : 'the stream title does'} (same version number: "GTA 6" stays "GTA 6", never an older game), in the title, hashtags and tags alike.
 Suggested title from another tool: "${clip.video_title_for_youtube_short ?? ''}".
 What is said in the clip: """${transcript || '(no speech)'}"""
-Return JSON: {"title": string (max 90 chars, curiosity hook, no clickbait lies, include ${streamer}), "description": string (2-3 short lines describing the moment, then the line "Credit: ${streamer} - ${creditUrl}", then 3-5 hashtags including #shorts), "tags": array of 12-18 relevant search tags (strings, no #)}`;
-  try {
-    const r = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent', {
-      method: 'POST', headers: { 'content-type': 'application/json', 'x-goog-api-key': GEMINI },
-      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { responseMimeType: 'application/json' } }),
-    });
-    const j = await r.json();
-    const d = JSON.parse(j.candidates[0].content.parts[0].text);
-    if (!d.title || !d.description || !Array.isArray(d.tags)) return fallback;
-    return d;
-  } catch { return fallback; }
+Return JSON: {"title": string (max 90 chars, curiosity hook, no clickbait lies, include ${streamer}), "description": string (2-3 short lines describing the moment, then the line "Credit: ${streamer} - ${creditUrl}", then 3-5 hashtags including #shorts), "tags": array of 12-18 relevant search tags (strings, no #), "voiceover": string (ONE sentence an AI narrator says BEFORE the clip plays: 9-13 words, about 4 seconds spoken; builds curiosity about what is about to happen without giving away the ending; names ${streamer} once; plain spoken English, no emojis, no hashtags, no quotes; e.g. "${streamer} had no idea what this guy was about to do to him.")}`;
+  // up to 3 tries: a busy free key sometimes answers 429/500 for a moment
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const r = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent', {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-goog-api-key': GEMINI },
+        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { responseMimeType: 'application/json' } }),
+      });
+      const j = await r.json();
+      const d = JSON.parse(j.candidates[0].content.parts[0].text);
+      if (d.title && d.description && Array.isArray(d.tags)) return d;
+    } catch { /* retry */ }
+    await sleep(15000 * attempt);
+  }
+  return fallback;
 }
 
 const probe = (f) => { const r = spawnSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height:format=duration', '-of', 'json', f], { encoding: 'utf8' }); try { const j = JSON.parse(r.stdout); return { w: j.streams[0].width, h: j.streams[0].height, dur: Number(j.format.duration) }; } catch { return {}; } };
@@ -321,28 +368,48 @@ async function makeShort(i, m) {
   try {
     log(`short ${k}/${moments.length}: OpenShorts...`);
     let r, p;
-    for (let attempt = 1; ; attempt++) { // never save a short under 30 s; retry once if the AI returns nothing
+    for (let attempt = 1; ; attempt++) { // never save a short under the minimum length; retry once if the AI returns nothing
       try { r = await openshorts(pieceOf(k)); } catch (e) {
         if (attempt >= 2) throw e;
         log(`short ${k}: OpenShorts returned no clip, retrying`);
         continue;
       }
       p = probe(r.video);
-      if (p.dur >= 30) break;
+      if (p.dur >= MIN - 0.5) break;
       if (attempt >= 2) throw new Error(`clip only ${Math.round(p.dur)} s after ${attempt} tries, not saved`);
       log(`short ${k}: came out ${Math.round(p.dur)} s, retrying`);
     }
     const { clip, transcript } = r;
     let src = r.video, layout = 'full';
     const split = await splitScreen(pieceOf(k), r, join(FINAL, `short_${pad(k)}.split.tmp.mp4`));
-    if (split) { const q = probe(split); if (q.dur >= 30) { p = q; src = split; layout = 'split'; } }
-    copyFileSync(src, mp4);
-    if (split && existsSync(split)) unlinkSync(split);
+    if (split) { const q = probe(split); if (q.dur >= MIN - 0.5) { p = q; src = split; layout = 'split'; } }
     const d = await ytDetails(clip, transcript);
-    const info = { ...d, stream_time: hms(m.t), chat_score: m.score, width: p.w, height: p.h, seconds: Math.round(p.dur), layout };
+    // AI voiceover intro: a few seconds of the first frame (blurred) while an AI voice says the hook line
+    let intro = 0;
+    if (INTRO) {
+      const line = (d.voiceover || `${streamer} was not ready for what happened next.`).replace(/[#\p{Extended_Pictographic}]/gu, '').trim();
+      const withIntro = join(FINAL, `short_${pad(k)}.intro.tmp.mp4`);
+      const ri = dockerExec(['python', 'intro_voice.py', inBox(src), inBox(withIntro), line, '--voice', VOICE]);
+      const q = existsSync(withIntro) ? probe(withIntro) : {};
+      if (ri.status === 0 && q.dur > p.dur) {
+        intro = +(q.dur - p.dur).toFixed(1);
+        p = q;
+        d.voiceover = line;
+        copyFileSync(withIntro, mp4);
+      } else {
+        log(`  voiceover intro failed, keeping the clip without it: ${(ri.stderr || '').trim().split('\n').pop()}`);
+        copyFileSync(src, mp4);
+      }
+      if (existsSync(withIntro)) unlinkSync(withIntro);
+    } else {
+      copyFileSync(src, mp4);
+    }
+    if (split && existsSync(split)) unlinkSync(split);
+    const info = { ...d, stream_time: hms(m.t), chat_score: m.score, width: p.w, height: p.h, seconds: Math.round(p.dur), layout, intro_seconds: intro };
     writeFileSync(txt + '.json', JSON.stringify(info, null, 2));
-    writeFileSync(txt, `TITLE:\n${d.title}\n\nDESCRIPTION:\n${d.description}\n\nTAGS:\n${d.tags.join(', ')}\n\n---\nFrom ${streamer}'s stream at ${hms(m.t)} (${SIGNAL} ${m.score}x louder than normal). ${p.w}x${p.h}, ${Math.round(p.dur)} s, ${layout === 'split' ? 'split screen' : 'full frame'}.\n`);
+    writeFileSync(txt, `TITLE:\n${d.title}\n\nDESCRIPTION:\n${d.description}\n\nTAGS:\n${d.tags.join(', ')}\n\n---\nFrom ${streamer}'s stream at ${hms(m.t)} (${SIGNAL} ${m.score}x louder than normal). ${p.w}x${p.h}, ${Math.round(p.dur)} s, ${layout === 'split' ? 'split screen' : 'full frame'}${intro ? `, starts with a ${intro} s AI voiceover: "${d.voiceover}"` : ''}.\n`);
     rows.push({ k, m, info });
+    cleanJob(r.dir);
     log(`short ${k}: done ${p.w}x${p.h} ${Math.round(p.dur)}s - ${d.title}`);
   } catch (e) { log(`short ${k}: FAILED ${e.message}`); }
 }

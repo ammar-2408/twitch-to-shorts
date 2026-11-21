@@ -4,7 +4,8 @@ Give it a **Twitch** stream link or a finished **YouTube** live stream link. It 
 
 - Full quality: 1080x1920 (vertical, 1080p)
 - **Split screen:** gameplay on top, the streamer's facecam below, captions in the middle
-- 35 to 60 seconds each
+- **AI voiceover intro:** every short opens with about 5 seconds of an AI voice saying a hook line about the clip (free, no account needed), then the clip plays
+- 35 to 60 seconds of clip each (plus the intro)
 - Captions burned into the video, no watermark
 - A ready-made **title, description and tags** for every short
 
@@ -210,6 +211,8 @@ Tips:
 | `This stream is still live or still processing` | The YouTube stream hasn't ended yet. Run it again after it ends |
 | `YouTube refused the request` / "Sign in to confirm you're not a bot" | YouTube wants a login. See **YouTube cookies** below |
 | Shorts came out full frame, not split screen | The streamer has no facecam, or it's hidden in those clips. That's expected |
+| `voiceover intro failed` | The free AI voice needs internet and sometimes drops a request. That short is still made, just without the intro |
+| The streamer's half looks softer than the game | Normal: a facecam is small in the original stream and has to be enlarged. It's cleaned and sharpened, and YouTube streams are taken in 1440p when available, which helps |
 | One short says `FAILED` | Run `start.bat` again with the same link. It retries only the missing ones |
 | Wrong Gemini key / key stopped working | Delete the file `openshorts\.env`, run `start.bat` again, and paste a new key |
 | PC is very slow | Normal while it's working. It uses most of your processor |
@@ -237,6 +240,8 @@ node make-shorts.mjs https://www.twitch.tv/videos/2932305259 --count 30 --min 35
 | `--max` | Longest length in seconds | 60 |
 | `--parallel` | How many shorts to make at the same time (each needs about 2 GB RAM) | 3 |
 | `--layout` | `split` (gameplay top, facecam bottom when there is one) or `full` (the whole picture, no split) | split |
+| `--intro` | `on` or `off`: the AI voiceover hook at the start of every short | on |
+| `--voice` | Which AI voice says the hook. Try `en-US-GuyNeural`, `en-US-RogerNeural`, `en-US-ChristopherNeural`, `en-US-EricNeural` | `en-US-AndrewNeural` |
 
 The link can be a Twitch video link or a YouTube link. OpenShorts must be running first. `start.bat` does this for you, or run `docker compose up -d --build backend` inside the `openshorts` folder.
 
@@ -254,7 +259,8 @@ This file is your login. **Never share it or upload it.** It's already excluded 
 ## Credits
 
 - [OpenShorts](https://github.com/mutonby/openshorts) (MIT license): picks the best part of each moment, transcribes it and makes the captions. A slightly modified copy is included in `openshorts/` (clips are always kept at least the minimum length; `split_render.py` adds the split-screen layout).
-- [yt-dlp](https://github.com/yt-dlp/yt-dlp) (inside the OpenShorts container): downloads YouTube chat replays, audio and clips.
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp) (inside the OpenShorts container): downloads YouTube chat replays, audio and clips. `ytlive.py` handles very long streams that YouTube is still processing.
+- [edge-tts](https://github.com/rany2/edge-tts) (inside the OpenShorts container): the free AI voice for the intro (`intro_voice.py`), using Microsoft Edge's online neural voices.
 - [TwitchDownloader](https://github.com/lay295/TwitchDownloader) (MIT license): downloads the chat and video. See `COPYRIGHT.txt` and `THIRD-PARTY-LICENSES.txt`.
 - `chat-clips.mjs`: the chat spike finder, from the Chat Clip Finder guide.
 - The clips belong to the streamers. Always give them credit.

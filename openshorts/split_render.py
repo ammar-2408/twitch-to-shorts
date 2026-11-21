@@ -17,6 +17,7 @@ OUT        output mp4 (1080x1920)
 Exit code 2 = no facecam found: the caller keeps the normal layout.
 """
 import json
+import os
 import re
 import subprocess
 import sys
@@ -89,46 +90,49 @@ def game_crop(fw, fh, window=None):
     return even(gw), even(gh), even(gx), even((fh - gh) / 2)
 
 
-def find_window(grays, box, fw, fh):
-    """The cam window's rectangle. Across frames from different parts of the
-    stream the gameplay changes completely while the room behind the streamer
-    stays still. The window is the rectangle around the person plus the still
-    areas (the room) touching the region near them."""
+def find_window(grays, box, fw, fh, s=4):
+    """The cam window's rectangle, from its borders. A facecam's border is a straight
+    line in the same place in every frame, while gameplay edges move, so edge
+    strength averaged over frames from all over the stream picks out the border.
+    Each side is searched near the person; a weak side falls back to the person's
+    own edge (or the screen edge when the cam touches it)."""
     import cv2
     import numpy as np
     if len(grays) < 6:
         return None
-    s = 4  # work at quarter size
-    std = cv2.blur(np.std(np.stack(grays).astype(np.float32), axis=0), (3, 3))
-    still = (std < 14).astype(np.uint8)
-    H, W = still.shape
-    x, y, w, h = [v / s for v in box]
-    # search region: the person plus a person-size margin each side
-    rx0, ry0 = int(max(0, x - w * 1.2)), int(max(0, y - h * 0.8))
-    rx1, ry1 = int(min(W, x + w * 2.2)), int(min(H, y + h * 1.8))
-    n, labels, stats, _ = cv2.connectedComponentsWithStats(still, connectivity=8)
-    region = labels[ry0:ry1, rx0:rx1]
-    keep = np.zeros_like(region, dtype=bool)
-    area = region.size
-    for lab in range(1, n):
-        m = region == lab
-        if m.sum() >= 0.02 * area:
-            keep |= m
-    ys, xs = np.nonzero(keep)
-    if not len(xs):
-        return None
-    wx0, wy0 = min(int(x), rx0 + int(xs.min())), min(int(y), ry0 + int(ys.min()))
-    wx1, wy1 = max(int(x + w), rx0 + int(xs.max()) + 1), max(int(y + h), ry0 + int(ys.max()) + 1)
-    win = [wx0 * s, wy0 * s, (wx1 - wx0) * s, (wy1 - wy0) * s]
-    # sanity: bigger than the person, not a big part of the screen
-    if win[2] < box[2] or win[3] < box[3] * 0.9 or win[2] * win[3] > 0.25 * fw * fh:
-        return None
-    # a real cam window is a solid rectangle: room (still) + person. If much of the
-    # rectangle is moving pixels, it swallowed gameplay that merely looked still.
-    solid = still[wy0:wy1, wx0:wx1].astype(bool)
-    px0, py0 = int(x) - wx0, int(y) - wy0
-    solid[max(0, py0):max(0, py0) + int(h), max(0, px0):max(0, px0) + int(w)] = True
-    if solid.mean() < 0.7:
+    ex = np.mean([np.abs(cv2.Sobel(g.astype(np.float32), cv2.CV_32F, 1, 0, ksize=3)) for g in grays], axis=0)
+    ey = np.mean([np.abs(cv2.Sobel(g.astype(np.float32), cv2.CV_32F, 0, 1, ksize=3)) for g in grays], axis=0)
+    H, W = ex.shape
+    x, y, w, h = [int(v / s) for v in box]
+    STRONG = 3.0
+
+    def best(profile, lo, hi):
+        lo, hi = max(0, lo), min(len(profile) - 1, hi)
+        if hi <= lo:
+            return None, 0.0
+        seg = profile[lo:hi + 1]
+        i = int(np.argmax(seg))
+        base = float(np.median(profile[max(0, lo - 20):min(len(profile), hi + 20)])) + 1e-6
+        return lo + i, float(seg[i]) / base
+
+    colp = ex[max(0, y):min(H, y + h)].mean(axis=0)
+    right, rs = best(colp, x + w - int(0.15 * w), x + w + int(1.5 * w))
+    left, ls = best(colp, x - int(1.5 * w), x + int(0.15 * w))
+    if rs < STRONG:
+        right = min(W - 1, x + w)
+    if ls < STRONG:
+        left = 0 if x < 0.1 * W else x          # cam pinned to the screen's left edge
+    if right >= W - 2 or (x + w) > 0.9 * W and rs < STRONG:
+        right = W - 1 if (x + w) > 0.9 * W else right
+    rowp = ey[:, max(0, left):min(W, right + 1)].mean(axis=1)
+    top, ts = best(rowp, y - h, y + int(0.25 * h))
+    bottom, bs = best(rowp, y + int(0.6 * h), y + h + int(0.6 * h))
+    if ts < STRONG:
+        top = y
+    if bs < STRONG:
+        bottom = min(H - 1, y + h)
+    win = [left * s, top * s, (right - left) * s, (bottom - top) * s]
+    if win[2] < box[2] * 0.6 or win[3] < box[3] * 0.6 or win[2] * win[3] > 0.25 * fw * fh:
         return None
     return win
 
@@ -254,14 +258,19 @@ def main():
     graph = (
         f"[0:v]split=2[g][c];"
         f"[g]crop={gw}:{gh}:{gx}:{gy},scale={OUT_W}:{HALF}:flags=lanczos[top];"
-        f"[c]crop={cw}:{ch}:{cx}:{cy},scale={OUT_W}:{HALF}:flags=lanczos,unsharp=5:5:0.7:5:5:0[bot];"
+        # the cam is small in the source: clean compression blocks first, enlarge, then contrast-adaptive sharpen
+        f"[c]crop={cw}:{ch}:{cx}:{cy},hqdn3d=1.5:1.5:4:4,scale={OUT_W}:{HALF}:flags=lanczos,cas=0.7[bot];"
         f"[top][bot]vstack=inputs=2,setsar=1,ass=filename='{seam}'[v]"
     )
     cmd = ["ffmpeg", "-y", "-v", "error", "-ss", str(start), "-to", str(end), "-i", src, "-i", audio_clip,
            "-filter_complex", graph, "-map", "[v]", "-map", "1:a:0", "-shortest",
            "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p",
            "-c:a", "copy", "-movflags", "+faststart", out]
-    subprocess.run(cmd, check=True)
+    try:
+        subprocess.run(cmd, check=True)
+    finally:
+        if os.path.exists(seam):
+            os.unlink(seam)
     print("SPLIT", json.dumps({"cam_box": box, "window": window, "cam_crop": [cw, ch, cx, cy], "game_crop": [gw, gh, gx, gy]}))
 
 

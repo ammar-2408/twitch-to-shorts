@@ -128,6 +128,10 @@ ENV NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
 # Latest yt-dlp (nightly — it updates frequently) plus its helper plugin.
 RUN pip install --upgrade --pre --no-cache-dir "yt-dlp[default]" bgutil-ytdlp-pot-provider
 
+# Local addition: free AI voice (Microsoft Edge neural TTS, no key) for the
+# voiceover intro that make-shorts.mjs puts at the start of every short (intro_voice.py).
+RUN pip install --no-cache-dir edge-tts==7.3.1
+
 # Copy application code
 COPY . .
 
