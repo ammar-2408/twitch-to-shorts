@@ -36,11 +36,15 @@ const VOD = ytId ?? (arg.match(/videos\/(\d+)/)?.[1] ?? arg.match(/^(\d+)$/)[1])
 const YT_URL = ytId && `https://www.youtube.com/watch?v=${ytId}`;
 const COUNT = Number(opt('count', 30));
 const MIN = Number(opt('min', 35));
-const MAX = Number(opt('max', 60));
+const MAX = Number(opt('max', 45));    // shorter shorts keep more viewers to the end
 const BEFORE = Number(opt('before', 40)); // piece = 40 s before the chat spike + 20 s after
 const AFTER = Number(opt('after', 20));
 const LAYOUT = opt('layout', 'split');    // split = gameplay top + facecam bottom (when there is a facecam); full = whole frame
-const INTRO = opt('intro', 'on') !== 'off'; // AI voiceover hook at the start of every short
+const INTRO = opt('intro', 'on') !== 'off'; // AI voiceover hook at the start of every short (on the paused first frame)
+const BAR = opt('bar', 'on') !== 'off';     // progress bar along the top
+const PUNCH = opt('punch', 'on') !== 'off'; // whoosh + quick zoom where the intro ends and the clip starts
+const PICK = Math.max(1, Number(opt('pick', 1.3))); // make this many times more shorts, keep the best --count (AI virality score)
+const CANDIDATES = Math.ceil(COUNT * PICK);
 const VOICE = opt('voice', 'en-US-AndrewNeural'); // any edge-tts voice, e.g. en-US-GuyNeural, en-US-RogerNeural
 const CAM_SHARE = Math.min(60, Math.max(25, Number(opt('cam', 40)))) / 100; // split screen: the facecam's share of the height (smaller = sharper streamer)
 const SEAM_Y = 1920 - 2 * Math.round(1920 * CAM_SHARE / 2);              // where gameplay meets facecam (captions sit there)
@@ -50,7 +54,7 @@ const OS_OUT = join(HERE, 'openshorts', 'output');
 const DOCKER = 'openshorts-backend'; // container_name in openshorts/docker-compose.yml; it mounts this folder at /host
 
 const RUN = join(HERE, 'runs', ytId ? `yt_${VOD}` : VOD);
-const PIECES = join(RUN, 'pieces'), FINAL = join(RUN, 'final');
+const PIECES = join(RUN, 'pieces'), FINAL = join(RUN, 'final'), EXTRA = join(FINAL, 'extra');
 for (const d of [RUN, PIECES, FINAL]) mkdirSync(d, { recursive: true });
 const log = (...m) => console.log(new Date().toLocaleTimeString(), ...m);
 const run = (cmd, a) => { const r = spawnSync(cmd, a, { stdio: ['ignore', 'ignore', 'inherit'] }); return r.status === 0; };
@@ -157,7 +161,7 @@ function loudnessMoments(length, segments) {
   const order = score.map((_, i) => i).sort((a, b) => score[b] - score[a]);
   const peaks = [];
   for (const i of order) {
-    if (peaks.length >= COUNT) break;
+    if (peaks.length >= CANDIDATES) break;
     const t = i * BUCKET;
     if (db[i] < -45 || t < 120) continue; // silence, or the stream's opening minutes
     if (peaks.some((p) => Math.abs(p.t - t) < GAP)) continue;
@@ -184,13 +188,13 @@ const game = chapters.length ? [...chapters].sort((a, b) => b.lengthMilliseconds
 const momentsFile = join(RUN, 'moments.json');
 if (!existsSync(momentsFile)) {
   log(`Finding top ${COUNT} chat spikes...`);
-  run('node', [join(HERE, 'chat-clips.mjs'), chatFile, '--top', String(COUNT + 5), '--before', String(BEFORE), '--after', String(AFTER), '--gap', '90', '--out', RUN]);
+  run('node', [join(HERE, 'chat-clips.mjs'), chatFile, '--top', String(CANDIDATES + 5), '--before', String(BEFORE), '--after', String(AFTER), '--gap', '90', '--out', RUN]);
   // Drop the opening 2 minutes (everyone saying hi is a spike, not a moment), give every piece the full
   // BEFORE+AFTER length (OpenShorts needs 45 s+ to cut from), keep the best COUNT, in stream order.
   const len = chatMeta.video?.length || Infinity;
   const ms = JSON.parse(readFileSync(momentsFile, 'utf8'))
     .filter((m) => m.t >= 120)
-    .sort((a, b) => b.score - a.score).slice(0, COUNT)
+    .sort((a, b) => b.score - a.score).slice(0, CANDIDATES)
     .map((m) => { const start = Math.max(0, Math.min(m.t - BEFORE, len - BEFORE - AFTER)); return { ...m, start, end: start + BEFORE + AFTER }; })
     .sort((a, b) => a.t - b.t);
   writeFileSync(momentsFile, JSON.stringify(ms, null, 2));
@@ -364,6 +368,8 @@ async function worker() {
 async function makeShort(i, m) {
   const k = i + 1, mp4 = join(FINAL, `short_${pad(k)}.mp4`), txt = join(FINAL, `short_${pad(k)}.txt`);
   if (existsSync(mp4) && existsSync(txt)) { rows.push({ k, m, info: JSON.parse(readFileSync(txt + '.json', 'utf8')) }); return; }
+  const xtxt = join(EXTRA, `short_${pad(k)}.txt`); // already made, set aside by an earlier "keep the best" pass
+  if (existsSync(join(EXTRA, `short_${pad(k)}.mp4`)) && existsSync(xtxt)) { rows.push({ k, m, info: JSON.parse(readFileSync(xtxt + '.json', 'utf8')) }); return; }
   while (!(existsSync(pieceOf(k)) && statSync(pieceOf(k)).size > 1e6) && !dlDone) await sleep(5000);
   await sleep(3000); // let the downloader finish writing
   if (!existsSync(pieceOf(k))) { log(`short ${k}: no piece, skipped`); return; }
@@ -386,28 +392,30 @@ async function makeShort(i, m) {
     const split = await splitScreen(pieceOf(k), r, join(FINAL, `short_${pad(k)}.split.tmp.mp4`));
     if (split) { const q = probe(split); if (q.dur >= MIN - 0.5) { p = q; src = split; layout = 'split'; } }
     const d = await ytDetails(clip, transcript);
-    // AI voiceover intro: a few seconds of the first frame (blurred) while an AI voice says the hook line
+    // Finishing, in one encode: the AI voiceover hook on the paused first frame, a whoosh + quick zoom into
+    // the clip, and a progress bar along the top.
     let intro = 0;
-    if (INTRO) {
-      const line = (d.voiceover || `${streamer} was not ready for what happened next.`).replace(/[#\p{Extended_Pictographic}]/gu, '').trim();
-      const withIntro = join(FINAL, `short_${pad(k)}.intro.tmp.mp4`);
-      const ri = dockerExec(['python', 'intro_voice.py', inBox(src), inBox(withIntro), line, '--voice', VOICE, ...(layout === 'split' ? ['--seam', String(SEAM_Y)] : [])]);
-      const q = existsSync(withIntro) ? probe(withIntro) : {};
-      if (ri.status === 0 && q.dur > p.dur) {
-        intro = +(q.dur - p.dur).toFixed(1);
+    if (INTRO || BAR) {
+      const line = INTRO ? (d.voiceover || `${streamer} was not ready for what happened next.`).replace(/[#\p{Extended_Pictographic}]/gu, '').trim() : '-';
+      const fin = join(FINAL, `short_${pad(k)}.fin.tmp.mp4`);
+      const ri = dockerExec(['python', 'intro_voice.py', inBox(src), inBox(fin), line, '--voice', VOICE,
+        ...(layout === 'split' ? ['--seam', String(SEAM_Y)] : []), ...(BAR ? ['--bar'] : []), ...(PUNCH && INTRO ? ['--punch'] : [])]);
+      const q = existsSync(fin) ? probe(fin) : {};
+      if (ri.status === 0 && q.dur >= p.dur - 0.2) {
+        if (INTRO) { intro = +(q.dur - p.dur).toFixed(1); d.voiceover = line; }
         p = q;
-        d.voiceover = line;
-        copyFileSync(withIntro, mp4);
+        copyFileSync(fin, mp4);
       } else {
-        log(`  voiceover intro failed, keeping the clip without it: ${(ri.stderr || '').trim().split('\n').pop()}`);
+        log(`  finishing step (voiceover/bar) failed, keeping the clip without it: ${(ri.stderr || '').trim().split('\n').pop()}`);
         copyFileSync(src, mp4);
       }
-      if (existsSync(withIntro)) unlinkSync(withIntro);
+      if (existsSync(fin)) unlinkSync(fin);
     } else {
       copyFileSync(src, mp4);
     }
     if (split && existsSync(split)) unlinkSync(split);
-    const info = { ...d, stream_time: hms(m.t), chat_score: m.score, width: p.w, height: p.h, seconds: Math.round(p.dur), layout, intro_seconds: intro };
+    const info = { ...d, stream_time: hms(m.t), chat_score: m.score, viral_score: clip.predicted_score ?? null,
+      width: p.w, height: p.h, seconds: Math.round(p.dur), layout, intro_seconds: intro };
     writeFileSync(txt + '.json', JSON.stringify(info, null, 2));
     writeFileSync(txt, `TITLE:\n${d.title}\n\nDESCRIPTION:\n${d.description}\n\nTAGS:\n${d.tags.join(', ')}\n\n---\nFrom ${streamer}'s stream at ${hms(m.t)} (${SIGNAL} ${m.score}x louder than normal). ${p.w}x${p.h}, ${Math.round(p.dur)} s, ${layout === 'split' ? 'split screen' : 'full frame'}${intro ? `, starts with a ${intro} s AI voiceover: "${d.voiceover}"` : ''}.\n`);
     rows.push({ k, m, info });
@@ -418,7 +426,22 @@ async function makeShort(i, m) {
 await Promise.all(Array.from({ length: PARALLEL }, worker));
 await dl;
 
+// Keep the best: more shorts were made than asked (--pick). Rank them by the AI's virality score (the chat/loudness
+// hype breaks ties), keep --count in final\, and set the rest aside in final\extra\ (not deleted).
+const rank = (r) => (Number(r.info.viral_score) || 0) * 10 + (Number(r.info.chat_score) || 0);
+rows.sort((a, b) => rank(b) - rank(a));
+const keep = rows.slice(0, COUNT), aside = rows.slice(COUNT);
+const place = (k, toExtra) => {
+  for (const ext of ['.mp4', '.txt', '.txt.json']) {
+    const name = `short_${pad(k)}${ext}`, from = join(toExtra ? FINAL : EXTRA, name), to = join(toExtra ? EXTRA : FINAL, name);
+    if (existsSync(from)) { mkdirSync(toExtra ? EXTRA : FINAL, { recursive: true }); renameSync(from, to); }
+  }
+};
+for (const { k } of keep) place(k, false);
+for (const { k } of aside) place(k, true);
+if (aside.length) log(`Kept the ${keep.length} best of ${rows.length} shorts (AI virality score). The other ${aside.length} ${aside.length === 1 ? 'is' : 'are'} in final\\extra.`);
+
 const csv = (s) => `"${String(s ?? '').replace(/"/g, '""')}"`;
-writeFileSync(join(FINAL, 'shorts.csv'), 'file,seconds,resolution,stream_time,chat_score,title,description,tags\n' +
-  rows.sort((a, b) => b.info.chat_score - a.info.chat_score).map(({ k, info }) => [`short_${pad(k)}.mp4`, info.seconds, `${info.width}x${info.height}`, info.stream_time, info.chat_score, info.title, info.description, info.tags.join(', ')].map(csv).join(',')).join('\n'));
-log(`DONE: ${rows.length} shorts in ${FINAL} (shorts.csv is sorted best-first)`);
+writeFileSync(join(FINAL, 'shorts.csv'), 'file,seconds,resolution,stream_time,viral_score,chat_score,title,description,tags\n' +
+  keep.map(({ k, info }) => [`short_${pad(k)}.mp4`, info.seconds, `${info.width}x${info.height}`, info.stream_time, info.viral_score ?? '', info.chat_score, info.title, info.description, info.tags.join(', ')].map(csv).join(',')).join('\n'));
+log(`DONE: ${keep.length} shorts in ${FINAL} (shorts.csv is sorted best-first)`);

@@ -93,6 +93,9 @@ def captions(words, total, path, w, h, seam=None):
 def main():
     args = sys.argv[1:]
     voice, mx, seam = VOICE, MAX, None
+    bar = "--bar" in args          # progress bar along the top
+    punch = "--punch" in args      # whoosh + quick zoom where the intro ends and the clip starts
+    args = [a for a in args if a not in ("--bar", "--punch")]
     if "--voice" in args:
         i = args.index("--voice"); voice = args[i + 1]; del args[i:i + 2]
     if "--seam" in args:
@@ -100,44 +103,76 @@ def main():
     if "--max" in args:
         i = args.index("--max"); mx = float(args[i + 1]); del args[i:i + 2]
     src, out, text = args[0], args[1], " ".join(args[2].split())
+    intro = text not in ("", "-")      # "-" = no voiceover, only the bar
     mp3, ass = out + ".voice.mp3", out + ".intro.ass"
-
-    words, total = [], 0.0
-    for rate in ("+8%", "+20%", "+32%"):   # faster until the line fits
-        words = asyncio.run(speak(text, voice, rate, mp3))
-        total = duration(mp3) + PAD
-        if total <= mx:
-            break
-    total = min(total, mx + 1.0)
 
     v = probe(src, "stream=width,height,r_frame_rate")["streams"][0]
     w, h = int(v["width"]), int(v["height"])
     num, den = (int(x) for x in v["r_frame_rate"].split("/"))
     fps = round(num / den) or 30
-    frames = max(1, round(total * fps))
-    captions(words, total, ass, w, h, seam)
-    mid = seam or h // 2
-    band_h = int(h * 0.17)
-    band_y = max(0, min(h - band_h, mid - band_h // 2))
+    clip_dur = duration(src)
 
-    graph = (
-        f"[0:v]split=2[f][m];"
-        # the first frame, held, blurred, darkened, slowly zooming in (~6%)
-        # (timestamps set straight after the loop: an fps filter there kept only one frame)
-        f"[f]trim=end_frame=1,loop=loop={frames - 1}:size=1:start=0,setpts=N/{fps}/TB,"
-        f"scale=w='trunc({w}*(1+0.06*t/{total:.3f})/2)*2':h=-2:eval=frame:flags=bicubic,crop={w}:{h},"
-        f"gblur=sigma=30,eq=brightness=-0.04:saturation=1.15,"
-        # a soft dark band behind the hook words (hides the clip's own caption under the blur)
-        f"drawbox=x=0:y={band_y}:w=iw:h={band_h}:color=black@0.92:t=fill,"
-        f"setsar=1,format=yuv420p,ass=filename='{ass}'[iv];"
-        f"[m]setpts=PTS-STARTPTS,format=yuv420p,setsar=1[mv];"
-        f"[iv][mv]concat=n=2:v=1:a=0[v];"
-        f"[1:a]loudnorm=I=-14:TP=-1.5:LRA=11,aresample=44100,aformat=channel_layouts=stereo,apad,atrim=0:{total:.3f}[va];"
-        f"[0:a]aresample=44100,aformat=channel_layouts=stereo,asetpts=PTS-STARTPTS[ma];"
-        f"[va][ma]concat=n=2:v=0:a=1[a]"
-    )
-    r = subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", src, "-i", mp3, "-filter_complex", graph,
-                        "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-preset", "fast", "-crf", "16",
+    words, total = [], 0.0
+    inputs = ["-i", src]
+    g = []
+    if intro:
+        for rate in ("+8%", "+20%", "+32%"):   # faster until the line fits
+            words = asyncio.run(speak(text, voice, rate, mp3))
+            total = duration(mp3) + PAD
+            if total <= mx:
+                break
+        total = min(total, mx + 1.0)
+        frames = max(1, round(total * fps))
+        captions(words, total, ass, w, h, seam)
+        mid = seam or h // 2
+        band_h = int(h * 0.17)
+        band_y = max(0, min(h - band_h, mid - band_h // 2))
+        inputs += ["-i", mp3]
+        g.append(
+            f"[0:v]split=2[f][m];"
+            # the first frame, paused (sharp, no blur), very slowly zooming in (~4%) so it does not look stuck
+            # (timestamps set straight after the loop: an fps filter there kept only one frame)
+            f"[f]trim=end_frame=1,loop=loop={frames - 1}:size=1:start=0,setpts=N/{fps}/TB,"
+            f"scale=w='trunc({w}*(1+0.04*t/{total:.3f})/2)*2':h=-2:eval=frame:flags=bicubic,crop={w}:{h},"
+            # a dark title band behind the hook words (covers the clip's own caption on the paused frame)
+            f"drawbox=x=0:y={band_y}:w=iw:h={band_h}:color=black@1.0:t=fill,"
+            f"setsar=1,format=yuv420p,ass=filename='{ass}'[iv];"
+        )
+        # the clip: with --punch it starts on a quick zoom (10% -> 0 over 0.35 s)
+        zoom = (f"scale=w='trunc({w}*(1+0.10*max(0,1-t/0.35))/2)*2':h=-2:eval=frame:flags=bicubic,crop={w}:{h},"
+                if punch else "")
+        g.append(f"[m]setpts=PTS-STARTPTS,{zoom}format=yuv420p,setsar=1[mv];[iv][mv]concat=n=2:v=1:a=0[v0];")
+        g.append(
+            f"[1:a]loudnorm=I=-14:TP=-1.5:LRA=11,aresample=44100,aformat=channel_layouts=stereo,apad,atrim=0:{total:.3f}[va];"
+            f"[0:a]aresample=44100,aformat=channel_layouts=stereo,asetpts=PTS-STARTPTS[ma];"
+            f"[va][ma]concat=n=2:v=0:a=1[a0];"
+        )
+        if punch:
+            # a "whoosh" made from filtered noise (no sound file, no licence), peaking at the cut
+            at = max(0, int((total - 0.3) * 1000))
+            g.append(
+                f"anoisesrc=d=0.6:c=pink:r=44100:a=0.7,highpass=f=400,lowpass=f=6000,"
+                f"afade=t=in:st=0:d=0.3:curve=exp,afade=t=out:st=0.3:d=0.3:curve=exp,"
+                f"aformat=channel_layouts=stereo,volume=0.55,adelay=delays={at}:all=1[wh];"
+                f"[a0][wh]amix=inputs=2:normalize=0:duration=first[a1];"
+            )
+        else:
+            g.append("[a0]anull[a1];")
+    else:
+        g.append("[0:v]setpts=PTS-STARTPTS,format=yuv420p,setsar=1[v0];[0:a]asetpts=PTS-STARTPTS[a1];")
+    dur = total + clip_dur
+    if bar:
+        bh = max(8, h // 160)   # 12 px on 1920
+        g.append(
+            f"color=c=0xFFD400:s={w}x{bh}:r={fps}:d={dur:.3f}[bar];"
+            f"[v0]drawbox=x=0:y=0:w=iw:h={bh}:color=black@0.35:t=fill[vt];"
+            f"[vt][bar]overlay=x='-w+w*t/{dur:.3f}':y=0:eval=frame:shortest=1[v]"
+        )
+    else:
+        g.append("[v0]null[v]")
+    graph = "".join(g).rstrip(";")
+    r = subprocess.run(["ffmpeg", "-y", "-v", "error", *inputs, "-filter_complex", graph,
+                        "-map", "[v]", "-map", "[a1]", "-c:v", "libx264", "-preset", "fast", "-crf", "16",
                         "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", out],
                        capture_output=True, text=True)
     for f in (mp3, ass):
@@ -148,7 +183,7 @@ def main():
             pass
     if r.returncode != 0:
         sys.exit(r.stderr.strip()[-400:])
-    print(json.dumps({"intro_seconds": round(total, 2), "voice": voice, "words": len(words)}))
+    print(json.dumps({"intro_seconds": round(total, 2), "voice": voice, "words": len(words), "bar": bar, "punch": punch}))
 
 
 if __name__ == "__main__":

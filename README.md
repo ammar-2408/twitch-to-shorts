@@ -4,8 +4,10 @@ Give it a **Twitch** stream link or a finished **YouTube** live stream link. It 
 
 - Full quality: 1080x1920 (vertical, 1080p)
 - **Split screen:** gameplay on top (60%), the streamer's facecam below (40%), captions on the line between them
-- **AI voiceover intro:** every short opens with about 5 seconds of an AI voice saying a hook line about the clip (free, no account needed), then the clip plays
-- 35 to 60 seconds of clip each (plus the intro)
+- **AI voiceover intro:** every short opens on its first frame, paused, while an AI voice says a hook line about the clip (about 5 seconds, free, no account needed), then a whoosh and a quick zoom into the clip
+- **Progress bar** along the top, so viewers see how much is left and stay to the end
+- **Only the best:** it makes about 30% more shorts than you ask for and keeps the ones the AI rates most viral (the rest go to `final\extra`)
+- 35 to 45 seconds of clip each (plus the intro)
 - Captions burned into the video, no watermark
 - A ready-made **title, description and tags** for every short
 
@@ -167,6 +169,7 @@ Inside you'll find:
 | `short_01.mp4` to `short_30.mp4` | Your shorts, ready to upload |
 | `short_01.txt` to `short_30.txt` | Title, description and tags for each short. Open with Notepad and copy-paste into YouTube |
 | `shorts.csv` | A list of all shorts in one sheet (opens in Excel), **best moments first** |
+| `extra\` | The extra shorts that didn't make the cut (lower AI score). Still usable if you want more |
 
 ---
 
@@ -237,7 +240,10 @@ node make-shorts.mjs https://www.twitch.tv/videos/2932305259 --count 30 --min 35
 |---|---|---|
 | `--count` | How many shorts to make | 30 |
 | `--min` | Shortest length in seconds | 35 |
-| `--max` | Longest length in seconds | 60 |
+| `--max` | Longest length in seconds | 45 |
+| `--pick` | Make this many times more shorts than `--count` and keep the best ones (1 = no extras) | 1.3 |
+| `--bar` | `on` or `off`: progress bar along the top | on |
+| `--punch` | `on` or `off`: whoosh + quick zoom where the intro ends and the clip starts | on |
 | `--parallel` | How many shorts to make at the same time (each needs about 2 GB RAM) | 3 |
 | `--layout` | `split` (gameplay top, facecam bottom when there is one) or `full` (the whole picture, no split) | split |
 | `--cam` | Split screen: how much of the height the streamer's facecam gets, in percent (25 to 60). Smaller looks sharper, because the small facecam is enlarged less | 40 |

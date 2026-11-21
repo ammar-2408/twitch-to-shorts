@@ -2952,6 +2952,17 @@ if __name__ == '__main__':
         frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         duration = frame_count / fps
         cap.release()
+        # Local patch: OpenCV's frame count can overstate the length of a cut
+        # piece (a 60 s piece read as 66 s), so clips were placed past the end
+        # and came out short. Trust ffprobe's container duration when smaller.
+        try:
+            _p = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                                 "-of", "csv=p=0", input_video], capture_output=True, text=True)
+            _d = float((_p.stdout or "").strip() or 0)
+            if 0 < _d < duration:
+                duration = _d
+        except Exception:
+            pass
 
         # 3. Transcribe — unless the video has no audio, in which case fall back
         # to Gemini vision (picks clips from the imagery instead of the speech).
