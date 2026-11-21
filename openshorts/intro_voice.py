@@ -9,6 +9,7 @@ Then the clip plays as it was.
 """
 import asyncio
 import json
+import os
 import subprocess
 import sys
 
@@ -102,6 +103,11 @@ def main():
         i = args.index("--seam"); seam = int(args[i + 1]); del args[i:i + 2]
     if "--max" in args:
         i = args.index("--max"); mx = float(args[i + 1]); del args[i:i + 2]
+    still = None   # the first frame without captions (image or video): the intro pauses on it
+    if "--still" in args:
+        i = args.index("--still"); still = args[i + 1]; del args[i:i + 2]
+        if not os.path.exists(still):
+            still = None
     src, out, text = args[0], args[1], " ".join(args[2].split())
     intro = text not in ("", "-")      # "-" = no voiceover, only the bar
     mp3, ass = out + ".voice.mp3", out + ".intro.ass"
@@ -128,15 +134,20 @@ def main():
         band_h = int(h * 0.17)
         band_y = max(0, min(h - band_h, mid - band_h // 2))
         inputs += ["-i", mp3]
+        if still:
+            # the paused frame comes from a caption-free copy: the hook words look like normal captions
+            inputs += ["-i", still]
+            g.append(f"[2:v]trim=end_frame=1,scale={w}:{h},setsar=1[f];[0:v]null[m];")
+            cover = ""
+        else:
+            # no clean frame available: a solid band hides the clip's own caption behind the hook words
+            g.append("[0:v]split=2[f][m];")
+            cover = f"drawbox=x=0:y={band_y}:w=iw:h={band_h}:color=black@1.0:t=fill,"
         g.append(
-            f"[0:v]split=2[f][m];"
-            # the first frame, paused (sharp, no blur), very slowly zooming in (~4%) so it does not look stuck
+            # the first frame, paused: perfectly still and sharp
             # (timestamps set straight after the loop: an fps filter there kept only one frame)
             f"[f]trim=end_frame=1,loop=loop={frames - 1}:size=1:start=0,setpts=N/{fps}/TB,"
-            f"scale=w='trunc({w}*(1+0.04*t/{total:.3f})/2)*2':h=-2:eval=frame:flags=bicubic,crop={w}:{h},"
-            # a dark title band behind the hook words (covers the clip's own caption on the paused frame)
-            f"drawbox=x=0:y={band_y}:w=iw:h={band_h}:color=black@1.0:t=fill,"
-            f"setsar=1,format=yuv420p,ass=filename='{ass}'[iv];"
+            f"{cover}setsar=1,format=yuv420p,ass=filename='{ass}'[iv];"
         )
         # the clip: with --punch it starts on a quick zoom (10% -> 0 over 0.35 s)
         zoom = (f"scale=w='trunc({w}*(1+0.10*max(0,1-t/0.35))/2)*2':h=-2:eval=frame:flags=bicubic,crop={w}:{h},"
@@ -177,7 +188,6 @@ def main():
                        capture_output=True, text=True)
     for f in (mp3, ass):
         try:
-            import os
             os.unlink(f)
         except OSError:
             pass

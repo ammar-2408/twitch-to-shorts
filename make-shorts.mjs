@@ -398,8 +398,12 @@ async function makeShort(i, m) {
     if (INTRO || BAR) {
       const line = INTRO ? (d.voiceover || `${streamer} was not ready for what happened next.`).replace(/[#\p{Extended_Pictographic}]/gu, '').trim() : '-';
       const fin = join(FINAL, `short_${pad(k)}.fin.tmp.mp4`);
+      // the intro pauses on a caption-free first frame: split_render's still, or OpenShorts' clip before captions
+      const plain = existsSync(r.dir) && readdirSync(r.dir).find((f) => /_clip_\d+\.mp4$/.test(f) && !/^(subtitled_|temp_|wm_)/.test(f));
+      const still = layout === 'split' ? `${split}.still.png` : (plain ? join(r.dir, plain) : null);
       const ri = dockerExec(['python', 'intro_voice.py', inBox(src), inBox(fin), line, '--voice', VOICE,
-        ...(layout === 'split' ? ['--seam', String(SEAM_Y)] : []), ...(BAR ? ['--bar'] : []), ...(PUNCH && INTRO ? ['--punch'] : [])]);
+        ...(layout === 'split' ? ['--seam', String(SEAM_Y)] : []), ...(BAR ? ['--bar'] : []), ...(PUNCH && INTRO ? ['--punch'] : []),
+        ...(still && existsSync(still) ? ['--still', inBox(still)] : [])]);
       const q = existsSync(fin) ? probe(fin) : {};
       if (ri.status === 0 && q.dur >= p.dur - 0.2) {
         if (INTRO) { intro = +(q.dur - p.dur).toFixed(1); d.voiceover = line; }
@@ -414,6 +418,8 @@ async function makeShort(i, m) {
       copyFileSync(src, mp4);
     }
     if (split && existsSync(split)) unlinkSync(split);
+    const stillPng = join(FINAL, `short_${pad(k)}.split.tmp.mp4.still.png`);
+    if (existsSync(stillPng)) unlinkSync(stillPng);
     const info = { ...d, stream_time: hms(m.t), chat_score: m.score, viral_score: clip.predicted_score ?? null,
       width: p.w, height: p.h, seconds: Math.round(p.dur), layout, intro_seconds: intro };
     writeFileSync(txt + '.json', JSON.stringify(info, null, 2));

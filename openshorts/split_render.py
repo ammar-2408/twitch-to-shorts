@@ -278,12 +278,16 @@ def main():
         f"[g]crop={gw}:{gh}:{gx}:{gy},scale={OUT_W}:{TOP_H}:flags=lanczos[top];"
         # the cam is small in the source: clean compression blocks first, enlarge, then contrast-adaptive sharpen
         f"[c]crop={cw}:{ch}:{cx}:{cy},hqdn3d=1.5:1.5:4:4,scale={OUT_W}:{CAM_H}:flags=lanczos,cas=0.7[bot];"
-        f"[top][bot]vstack=inputs=2,setsar=1,ass=filename='{seam}'[v]"
+        f"[top][bot]vstack=inputs=2,setsar=1,split=2[comp][raw];"
+        f"[comp]ass=filename='{seam}'[v];"
+        # the first frame WITHOUT captions: the voiceover intro pauses on it (out.still.png)
+        f"[raw]trim=end_frame=1[still]"
     )
     cmd = ["ffmpeg", "-y", "-v", "error", "-ss", str(start), "-to", str(end), "-i", src, "-i", audio_clip,
            "-filter_complex", graph, "-map", "[v]", "-map", "1:a:0", "-shortest",
            "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p",
-           "-c:a", "copy", "-movflags", "+faststart", out]
+           "-c:a", "copy", "-movflags", "+faststart", out,
+           "-map", "[still]", "-frames:v", "1", "-update", "1", out + ".still.png"]
     try:
         subprocess.run(cmd, check=True)
     finally:
