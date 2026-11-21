@@ -116,6 +116,9 @@ def main():
     fps = round(num / den) or 30
     frames = max(1, round(total * fps))
     captions(words, total, ass, w, h, seam)
+    mid = seam or h // 2
+    band_h = int(h * 0.17)
+    band_y = max(0, min(h - band_h, mid - band_h // 2))
 
     graph = (
         f"[0:v]split=2[f][m];"
@@ -123,7 +126,10 @@ def main():
         # (timestamps set straight after the loop: an fps filter there kept only one frame)
         f"[f]trim=end_frame=1,loop=loop={frames - 1}:size=1:start=0,setpts=N/{fps}/TB,"
         f"scale=w='trunc({w}*(1+0.06*t/{total:.3f})/2)*2':h=-2:eval=frame:flags=bicubic,crop={w}:{h},"
-        f"gblur=sigma=30,eq=brightness=-0.16:saturation=1.1,setsar=1,format=yuv420p,ass=filename='{ass}'[iv];"
+        f"gblur=sigma=30,eq=brightness=-0.04:saturation=1.15,"
+        # a soft dark band behind the hook words (hides the clip's own caption under the blur)
+        f"drawbox=x=0:y={band_y}:w=iw:h={band_h}:color=black@0.92:t=fill,"
+        f"setsar=1,format=yuv420p,ass=filename='{ass}'[iv];"
         f"[m]setpts=PTS-STARTPTS,format=yuv420p,setsar=1[mv];"
         f"[iv][mv]concat=n=2:v=1:a=0[v];"
         f"[1:a]loudnorm=I=-14:TP=-1.5:LRA=11,aresample=44100,aformat=channel_layouts=stereo,apad,atrim=0:{total:.3f}[va];"
