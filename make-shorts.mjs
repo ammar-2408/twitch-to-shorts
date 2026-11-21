@@ -42,6 +42,8 @@ const AFTER = Number(opt('after', 20));
 const LAYOUT = opt('layout', 'split');    // split = gameplay top + facecam bottom (when there is a facecam); full = whole frame
 const INTRO = opt('intro', 'on') !== 'off'; // AI voiceover hook at the start of every short
 const VOICE = opt('voice', 'en-US-AndrewNeural'); // any edge-tts voice, e.g. en-US-GuyNeural, en-US-RogerNeural
+const CAM_SHARE = Math.min(60, Math.max(25, Number(opt('cam', 40)))) / 100; // split screen: the facecam's share of the height (smaller = sharper streamer)
+const SEAM_Y = 1920 - 2 * Math.round(1920 * CAM_SHARE / 2);              // where gameplay meets facecam (captions sit there)
 const API = opt('api', 'http://localhost:8000');
 const TDL = join(HERE, process.platform === 'win32' ? 'TwitchDownloaderCLI.exe' : 'TwitchDownloaderCLI');
 const OS_OUT = join(HERE, 'openshorts', 'output');
@@ -310,7 +312,7 @@ async function splitScreen(piece, r, out) {
   const ass = existsSync(r.dir) && readdirSync(r.dir).find((f) => /^autosubs_.*\.ass$/.test(f));
   if (!ass || r.clip.start == null || r.clip.end == null) return null;
   const res = dockerExec(['python', 'split_render.py', inBox(piece), String(r.clip.start), String(r.clip.end),
-    inBox(join(r.dir, ass)), inBox(r.video), inBox(out), box.join(',')]);
+    inBox(join(r.dir, ass)), inBox(r.video), inBox(out), box.join(','), String(CAM_SHARE)]);
   if (res.status === 0 && existsSync(out)) return out;
   log(res.status === 2 ? '  facecam hidden in this clip: keeping the full frame' : `  split screen failed, keeping the full frame: ${(res.stderr || '').trim().split('\n').pop()}`);
   return null;
@@ -389,7 +391,7 @@ async function makeShort(i, m) {
     if (INTRO) {
       const line = (d.voiceover || `${streamer} was not ready for what happened next.`).replace(/[#\p{Extended_Pictographic}]/gu, '').trim();
       const withIntro = join(FINAL, `short_${pad(k)}.intro.tmp.mp4`);
-      const ri = dockerExec(['python', 'intro_voice.py', inBox(src), inBox(withIntro), line, '--voice', VOICE]);
+      const ri = dockerExec(['python', 'intro_voice.py', inBox(src), inBox(withIntro), line, '--voice', VOICE, ...(layout === 'split' ? ['--seam', String(SEAM_Y)] : [])]);
       const q = existsSync(withIntro) ? probe(withIntro) : {};
       if (ri.status === 0 && q.dur > p.dur) {
         intro = +(q.dur - p.dur).toFixed(1);

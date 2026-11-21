@@ -25,7 +25,8 @@ import sys
 import camera_inset
 
 OUT_W, OUT_H = 1080, 1920
-HALF = OUT_H // 2
+CAM_H = OUT_H // 2      # bottom band (the facecam); set from the cam share argument
+TOP_H = OUT_H - CAM_H   # top band (the gameplay)
 
 
 def even(v):
@@ -60,7 +61,7 @@ def cam_crop(box, window, fw, fh):
     # stay a little inside the window's edges (borders, glow)
     m = max(2, int(min(ww, wh) * 0.02))
     wx, wy, ww, wh = wx + m, wy + m, ww - 2 * m, wh - 2 * m
-    aspect = OUT_W / HALF
+    aspect = OUT_W / CAM_H
     if ww / wh >= aspect:
         ch, cw = wh, wh * aspect
         x0 = min(max(wx, x + w / 2 - cw / 2), wx + ww - cw)
@@ -75,7 +76,7 @@ def cam_crop(box, window, fw, fh):
 def game_crop(fw, fh, window=None):
     """Centre crop of the gameplay, slid sideways so it stays clear of the
     cam window."""
-    aspect = OUT_W / HALF
+    aspect = OUT_W / TOP_H
     gh = fh
     gw = gh * aspect
     if gw > fw:
@@ -144,11 +145,20 @@ def person_window(box, fw, fh):
     return [max(0, x), max(0, y), min(w, fw - max(0, x)), min(h, fh - max(0, y))]
 
 
-def seam_ass(src, dst):
-    """Same captions, centred on the seam: Alignment 5 (middle centre), MarginV 0."""
+def seam_ass(src, dst, seam_y):
+    """Same captions, centred on the seam between the two bands (at seam_y px of
+    the 1920 px frame): Alignment 5 plus a \\pos on every line. PlayResX is set
+    to match the frame's shape so x and y use the same scale."""
     text = open(src, encoding="utf-8-sig").read()
+    m = re.search(r"^PlayResY:\s*(\d+)", text, re.M)
+    res_y = int(m.group(1)) if m else OUT_H
+    m = re.search(r"^PlayResX:\s*(\d+)", text, re.M)
+    res_x = int(m.group(1)) if m else round(res_y * OUT_W / OUT_H)
+    pos = "{\\pos(%d,%d)}" % (round(res_x / 2), round(seam_y * res_y / OUT_H))
     out = []
     for line in text.splitlines():
+        if line.startswith("PlayResY:") and "PlayResX:" not in text:
+            out.append(f"PlayResX: {res_x}")
         if line.startswith("Style:"):
             f = line[len("Style:"):].split(",")
             if len(f) >= 23:
@@ -156,7 +166,10 @@ def seam_ass(src, dst):
                 f[21] = "0"   # MarginV
                 line = "Style:" + ",".join(f)
         elif line.startswith("Dialogue:"):
-            line = re.sub(r"\\an\d", "", line)
+            line = re.sub(r"\\an\d|\\pos\([^)]*\)", "", line)
+            parts = line.split(",", 9)
+            if len(parts) == 10:
+                line = ",".join(parts[:9]) + "," + pos + parts[9]
         out.append(line)
     open(dst, "w", encoding="utf-8").write("\n".join(out) + "\n")
 
@@ -242,6 +255,11 @@ def main():
         print("CAM", json.dumps(box))
         return
     src, start, end, ass, audio_clip, out, box_arg = sys.argv[1:8]
+    # optional: the facecam's share of the height (0.4 = cam 40 %, gameplay 60 %)
+    global CAM_H, TOP_H
+    share = min(0.6, max(0.25, float(sys.argv[8]))) if len(sys.argv) > 8 else 0.5
+    CAM_H = even(OUT_H * share)
+    TOP_H = OUT_H - CAM_H
     vals = [int(v) for v in box_arg.split(",")]
     box = vals[:4]
     r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", src],
@@ -254,12 +272,12 @@ def main():
     cw, ch, cx, cy = cam_crop(box, window, fw, fh)
     gw, gh, gx, gy = game_crop(fw, fh, window)
     seam = out + ".seam.ass"
-    seam_ass(ass, seam)
+    seam_ass(ass, seam, TOP_H)
     graph = (
         f"[0:v]split=2[g][c];"
-        f"[g]crop={gw}:{gh}:{gx}:{gy},scale={OUT_W}:{HALF}:flags=lanczos[top];"
+        f"[g]crop={gw}:{gh}:{gx}:{gy},scale={OUT_W}:{TOP_H}:flags=lanczos[top];"
         # the cam is small in the source: clean compression blocks first, enlarge, then contrast-adaptive sharpen
-        f"[c]crop={cw}:{ch}:{cx}:{cy},hqdn3d=1.5:1.5:4:4,scale={OUT_W}:{HALF}:flags=lanczos,cas=0.7[bot];"
+        f"[c]crop={cw}:{ch}:{cx}:{cy},hqdn3d=1.5:1.5:4:4,scale={OUT_W}:{CAM_H}:flags=lanczos,cas=0.7[bot];"
         f"[top][bot]vstack=inputs=2,setsar=1,ass=filename='{seam}'[v]"
     )
     cmd = ["ffmpeg", "-y", "-v", "error", "-ss", str(start), "-to", str(end), "-i", src, "-i", audio_clip,
@@ -271,7 +289,7 @@ def main():
     finally:
         if os.path.exists(seam):
             os.unlink(seam)
-    print("SPLIT", json.dumps({"cam_box": box, "window": window, "cam_crop": [cw, ch, cx, cy], "game_crop": [gw, gh, gx, gy]}))
+    print("SPLIT", json.dumps({"seam": TOP_H, "cam_box": box, "window": window, "cam_crop": [cw, ch, cx, cy], "game_crop": [gw, gh, gx, gy]}))
 
 
 if __name__ == "__main__":

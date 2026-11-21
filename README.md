@@ -3,7 +3,7 @@
 Give it a **Twitch** stream link or a finished **YouTube** live stream link. It gives you back up to **30 finished YouTube Shorts**:
 
 - Full quality: 1080x1920 (vertical, 1080p)
-- **Split screen:** gameplay on top, the streamer's facecam below, captions in the middle
+- **Split screen:** gameplay on top (60%), the streamer's facecam below (40%), captions on the line between them
 - **AI voiceover intro:** every short opens with about 5 seconds of an AI voice saying a hook line about the clip (free, no account needed), then the clip plays
 - 35 to 60 seconds of clip each (plus the intro)
 - Captions burned into the video, no watermark
@@ -240,6 +240,7 @@ node make-shorts.mjs https://www.twitch.tv/videos/2932305259 --count 30 --min 35
 | `--max` | Longest length in seconds | 60 |
 | `--parallel` | How many shorts to make at the same time (each needs about 2 GB RAM) | 3 |
 | `--layout` | `split` (gameplay top, facecam bottom when there is one) or `full` (the whole picture, no split) | split |
+| `--cam` | Split screen: how much of the height the streamer's facecam gets, in percent (25 to 60). Smaller looks sharper, because the small facecam is enlarged less | 40 |
 | `--intro` | `on` or `off`: the AI voiceover hook at the start of every short | on |
 | `--voice` | Which AI voice says the hook. Try `en-US-GuyNeural`, `en-US-RogerNeural`, `en-US-ChristopherNeural`, `en-US-EricNeural` | `en-US-AndrewNeural` |
 

@@ -5,7 +5,7 @@ with an AI voice (Microsoft Edge neural TTS through edge-tts: free, no key)
 speaking a short hook line, the words shown as captions as they are spoken.
 Then the clip plays as it was.
 
-    python intro_voice.py IN.mp4 OUT.mp4 "TEXT" [--voice NAME] [--max 5.5]
+    python intro_voice.py IN.mp4 OUT.mp4 "TEXT" [--voice NAME] [--max 5.5] [--seam Y]
 """
 import asyncio
 import json
@@ -61,7 +61,7 @@ def ass_time(t):
     return f"{int(t // 3600)}:{int(t % 3600 // 60):02d}:{t % 60:05.2f}"
 
 
-def captions(words, total, path, w, h):
+def captions(words, total, path, w, h, seam=None):
     """Karaoke-style captions, a few words at a time (up to ~10 letters, so a line
     always fits the width), the one being spoken in yellow."""
     size = int(h * 0.095)   # about the size of OpenShorts' own captions
@@ -85,15 +85,18 @@ def captions(words, total, path, w, h):
             nxt = g[wi + 1][0] if wi + 1 < len(g) else (groups[gi + 1][0][0] if gi + 1 < len(groups) else total)
             text = " ".join(("{\\c&H00E5FF&}" + x.upper() + "{\\c&HFFFFFF&}") if j == wi else x.upper()
                             for j, (_, _, x) in enumerate(g))
-            lines.append(f"Dialogue: 0,{ass_time(s)},{ass_time(nxt)},Hook,,0,0,0,,{text}")
+            pos = "{\\pos(%d,%d)}" % (w // 2, seam) if seam else ""   # on the split's seam
+            lines.append(f"Dialogue: 0,{ass_time(s)},{ass_time(nxt)},Hook,,0,0,0,,{pos}{text}")
     open(path, "w", encoding="utf-8").write(head + "\n".join(lines) + "\n")
 
 
 def main():
     args = sys.argv[1:]
-    voice, mx = VOICE, MAX
+    voice, mx, seam = VOICE, MAX, None
     if "--voice" in args:
         i = args.index("--voice"); voice = args[i + 1]; del args[i:i + 2]
+    if "--seam" in args:
+        i = args.index("--seam"); seam = int(args[i + 1]); del args[i:i + 2]
     if "--max" in args:
         i = args.index("--max"); mx = float(args[i + 1]); del args[i:i + 2]
     src, out, text = args[0], args[1], " ".join(args[2].split())
@@ -112,7 +115,7 @@ def main():
     num, den = (int(x) for x in v["r_frame_rate"].split("/"))
     fps = round(num / den) or 30
     frames = max(1, round(total * fps))
-    captions(words, total, ass, w, h)
+    captions(words, total, ass, w, h, seam)
 
     graph = (
         f"[0:v]split=2[f][m];"
@@ -120,7 +123,7 @@ def main():
         # (timestamps set straight after the loop: an fps filter there kept only one frame)
         f"[f]trim=end_frame=1,loop=loop={frames - 1}:size=1:start=0,setpts=N/{fps}/TB,"
         f"scale=w='trunc({w}*(1+0.06*t/{total:.3f})/2)*2':h=-2:eval=frame:flags=bicubic,crop={w}:{h},"
-        f"gblur=sigma=14,eq=brightness=-0.10:saturation=1.15,setsar=1,format=yuv420p,ass=filename='{ass}'[iv];"
+        f"gblur=sigma=30,eq=brightness=-0.16:saturation=1.1,setsar=1,format=yuv420p,ass=filename='{ass}'[iv];"
         f"[m]setpts=PTS-STARTPTS,format=yuv420p,setsar=1[mv];"
         f"[iv][mv]concat=n=2:v=1:a=0[v];"
         f"[1:a]loudnorm=I=-14:TP=-1.5:LRA=11,aresample=44100,aformat=channel_layouts=stereo,apad,atrim=0:{total:.3f}[va];"
