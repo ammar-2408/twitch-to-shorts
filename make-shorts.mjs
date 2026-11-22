@@ -225,10 +225,17 @@ async function downloadPieces() {
       r = await spawnAsync('docker', ['exec', '-w', '/app', DOCKER, 'python', 'ytlive.py', 'piece', YT_URL, String(m.start), String(m.end), inBox(tmp), '--height', '1440', ...cookieArgs()]);
       if (r.status === 0 && existsSync(tmp)) renameSync(tmp, out);
     } else if (ytId) {
-      // 1080p max, H.264 first (OpenCV in the container decodes it everywhere; AV1 it may not).
-      r = await spawnAsync('docker', ['exec', '-w', '/app', DOCKER, 'yt-dlp', '--no-warnings', ...cookieArgs(), '--no-playlist', '--download-sections', `*${m.start}-${m.end}`,
-        '-f', 'bv*[height<=1440][height>1080][vcodec!^=av01]+ba/bv*[height<=1080][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=1080][vcodec!^=av01]+ba/b[height<=1080]/b',
-        '--merge-output-format', 'mp4', '--force-overwrites', '-o', inBox(out), YT_URL]);
+      // 1440p when the stream has it (more pixels for the facecam), else 1080p H.264 (OpenCV decodes it everywhere;
+      // AV1 it may not). The 1440p stream drops connections now and then: retry, then fall back to 1080p.
+      const fmts = ['bv*[height<=1440][height>1080][vcodec!^=av01]+ba/bv*[height<=1080][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=1080][vcodec!^=av01]+ba/b[height<=1080]/b',
+        'bv*[height<=1440][height>1080][vcodec!^=av01]+ba/bv*[height<=1080][vcodec^=avc1]+ba[ext=m4a]/b[height<=1080]/b',
+        'bv*[height<=1080][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=1080][vcodec!^=av01]+ba/b[height<=1080]/b'];
+      for (const [n, f] of fmts.entries()) {
+        r = await spawnAsync('docker', ['exec', '-w', '/app', DOCKER, 'yt-dlp', '--no-warnings', ...cookieArgs(), '--no-playlist', '--download-sections', `*${m.start}-${m.end}`,
+          '-f', f, '--merge-output-format', 'mp4', '--force-overwrites', '-o', inBox(out), YT_URL]);
+        if (r.status === 0 && existsSync(out)) break;
+        if (n < fmts.length - 1) await sleep(5000);
+      }
     } else {
       r = await spawnAsync(TDL, ['videodownload', '--id', VOD, '-b', hms(m.start), '-e', hms(m.end), '-o', out, '--collision', 'Overwrite']);
     }
@@ -413,7 +420,7 @@ async function makeShort(i, m) {
         log(`  finishing step (voiceover/bar) failed, keeping the clip without it: ${(ri.stderr || '').trim().split('\n').pop()}`);
         copyFileSync(src, mp4);
       }
-      if (existsSync(fin)) unlinkSync(fin);
+      for (const f of [fin, `${fin}.voice.mp3`, `${fin}.intro.ass`]) if (existsSync(f)) unlinkSync(f);
     } else {
       copyFileSync(src, mp4);
     }

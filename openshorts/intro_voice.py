@@ -33,7 +33,7 @@ async def speak_once(text, voice, rate, mp3):
     return words
 
 
-async def speak(text, voice, rate, mp3, tries=6):
+async def speak(text, voice, rate, mp3, tries=20):
     """Voice to mp3; returns [(start, end, word)] in seconds. The free service
     drops some requests ("No audio was received"), so retry with pauses."""
     for i in range(tries):
@@ -42,7 +42,7 @@ async def speak(text, voice, rate, mp3, tries=6):
         except edge_tts.exceptions.NoAudioReceived:
             if i == tries - 1:
                 raise
-            await asyncio.sleep(2 + 3 * i)
+            await asyncio.sleep(min(45, 3 + 4 * i))   # the service refuses in bursts, sometimes for minutes: wait it out (~10 min max)
 
 
 def probe(path, entries, stream="v:0"):

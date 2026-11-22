@@ -33,7 +33,7 @@ if %RAM% GEQ 16 set PAR=3
 echo %RAM% GB RAM: making %PAR% clip(s) at a time.
 
 rem --- Run, keeping the PC awake until it finishes ---
-powershell -NoProfile -Command "Add-Type -Name P -Namespace W -MemberDefinition '[DllImport(\"kernel32.dll\")] public static extern uint SetThreadExecutionState(uint f);'; [W.P]::SetThreadExecutionState([uint32]2147483649) | Out-Null; node make-shorts.mjs '%LINK%' --count 30 --parallel %PAR%"
+powershell -NoProfile -Command "Add-Type -Name P -Namespace W -MemberDefinition '[DllImport(\"kernel32.dll\")] public static extern uint SetThreadExecutionState(uint f);'; [W.P]::SetThreadExecutionState([uint32]2147483651) | Out-Null; node make-shorts.mjs '%LINK%' --count 30 --parallel %PAR%"
 
 echo.
 echo Finished. Your shorts are in the runs folder (runs\^<video id^>\final).
