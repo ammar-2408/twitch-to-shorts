@@ -21,7 +21,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, copyFileSync, openAsBlob, createReadStream, unlinkSync, rmSync, renameSync } from 'node:fs';
 import { spawnSync, spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
-import { join, basename, relative } from 'node:path';
+import { join, basename, relative, resolve } from 'node:path';
 
 const HERE = import.meta.dirname;
 const args = process.argv.slice(2);
@@ -47,7 +47,13 @@ const PICK = Math.max(1, Number(opt('pick', 1.3))); // make this many times more
 const CANDIDATES = Math.ceil(COUNT * PICK);
 const VOICE = opt('voice', 'en-US-AndrewNeural'); // any edge-tts voice, e.g. en-US-GuyNeural, en-US-RogerNeural
 const CAM_SHARE = Math.min(60, Math.max(25, Number(opt('cam', 40)))) / 100; // split screen: the facecam's share of the height (smaller = sharper streamer)
-const SEAM_Y = 1920 - 2 * Math.round(1920 * CAM_SHARE / 2);              // where gameplay meets facecam (captions sit there)
+const CAM_TOP = opt('cam-pos', 'bottom') === 'top';  // split screen: streamer on top, gameplay below (e.g. for a logo bottom-right)
+const CAM_PX = 2 * Math.round(1920 * CAM_SHARE / 2);
+const SEAM_Y = CAM_TOP ? CAM_PX : 1920 - CAM_PX;     // where gameplay meets facecam (captions sit there)
+const LOGO = opt('logo', null) && resolve(opt('logo')); // a campaign/sponsor PNG, bottom-right for the whole short
+const OUT = opt('out', 'final');                     // the folder inside the run the shorts go to
+const ONLY = opt('only', null) ? new Set(String(opt('only')).split(',').map(Number)) : null; // make only these shorts
+const HASHTAGS = (opt('hashtags', '') || '').split(/[\s,]+/).filter(Boolean).map((h) => (h.startsWith('#') ? h : `#${h}`)); // added to every description
 const API = opt('api', 'http://localhost:8000');
 const TDL = join(HERE, process.platform === 'win32' ? 'TwitchDownloaderCLI.exe' : 'TwitchDownloaderCLI');
 const OS_OUT = join(HERE, 'openshorts', 'output');
@@ -94,7 +100,7 @@ async function runFolderName() {
 }
 const existingRun = readdirSync(RUNS).find((d) => d === ID_TAG || d.endsWith(`(${ID_TAG})`));
 const RUN = join(RUNS, existingRun ?? await runFolderName());
-const PIECES = join(RUN, 'pieces'), FINAL = join(RUN, 'final'), EXTRA = join(FINAL, 'extra');
+const PIECES = join(RUN, 'pieces'), FINAL = join(RUN, OUT), EXTRA = join(FINAL, 'extra');
 for (const d of [RUN, PIECES, FINAL]) mkdirSync(d, { recursive: true });
 log(`Run folder: ${RUN}`);
 
@@ -246,6 +252,7 @@ const spawnAsync = (cmd, a) => new Promise((res) => {
 });
 async function downloadPieces() {
   for (const [i, m] of moments.entries()) {
+    if (ONLY && !ONLY.has(i + 1)) continue;
     const out = pieceOf(i + 1);
     if (existsSync(out) && statSync(out).size > 1e6) continue;
     log(`Downloading piece ${i + 1}/${moments.length} (${hms(m.start)}-${hms(m.end)})`);
@@ -354,7 +361,7 @@ async function splitScreen(piece, r, out) {
   const ass = existsSync(r.dir) && readdirSync(r.dir).find((f) => /^autosubs_.*\.ass$/.test(f));
   if (!ass || r.clip.start == null || r.clip.end == null) return null;
   const res = dockerExec(['python', 'split_render.py', inBox(piece), String(r.clip.start), String(r.clip.end),
-    inBox(join(r.dir, ass)), inBox(r.video), inBox(out), box.join(','), String(CAM_SHARE)]);
+    inBox(join(r.dir, ass)), inBox(r.video), inBox(out), box.join(','), String(CAM_SHARE), CAM_TOP ? 'top' : 'bottom']);
   if (res.status === 0 && existsSync(out)) return out;
   log(res.status === 2 ? '  facecam hidden in this clip: keeping the full frame' : `  split screen failed, keeping the full frame: ${(res.stderr || '').trim().split('\n').pop()}`);
   return null;
@@ -400,6 +407,7 @@ let next = 0;
 async function worker() {
   while (next < moments.length) {
     const i = next++;
+    if (ONLY && !ONLY.has(i + 1)) continue; // --only: the other moments are left alone
     await makeShort(i, moments[i]);
   }
 }
@@ -430,17 +438,23 @@ async function makeShort(i, m) {
     const split = await splitScreen(pieceOf(k), r, join(FINAL, `short_${pad(k)}.split.tmp.mp4`));
     if (split) { const q = probe(split); if (q.dur >= MIN - 0.5) { p = q; src = split; layout = 'split'; } }
     const d = await ytDetails(clip, transcript);
+    if (HASHTAGS.length) { // campaign hashtags: in the caption and the tags, whatever the AI wrote
+      const missing = HASHTAGS.filter((h) => !d.description.toLowerCase().includes(h.toLowerCase()));
+      if (missing.length) d.description = `${d.description.trim()}
+${missing.join(' ')}`;
+      for (const h of HASHTAGS) if (!d.tags.some((t) => t.toLowerCase() === h.slice(1).toLowerCase())) d.tags.push(h.slice(1));
+    }
     // Finishing, in one encode: the AI voiceover hook on the paused first frame, a whoosh + quick zoom into
     // the clip, and a progress bar along the top.
     let intro = 0;
-    if (INTRO || BAR) {
+    if (INTRO || BAR || LOGO) {
       const line = INTRO ? (d.voiceover || `${streamer} was not ready for what happened next.`).replace(/[#\p{Extended_Pictographic}]/gu, '').trim() : '-';
       const fin = join(FINAL, `short_${pad(k)}.fin.tmp.mp4`);
       // the intro pauses on a caption-free first frame: split_render's still, or OpenShorts' clip before captions
       const plain = existsSync(r.dir) && readdirSync(r.dir).find((f) => /_clip_\d+\.mp4$/.test(f) && !/^(subtitled_|temp_|wm_)/.test(f));
       const still = layout === 'split' ? `${split}.still.png` : (plain ? join(r.dir, plain) : null);
       const ri = dockerExec(['python', 'intro_voice.py', inBox(src), inBox(fin), line, '--voice', VOICE,
-        ...(layout === 'split' ? ['--seam', String(SEAM_Y)] : []), ...(BAR ? ['--bar'] : []), ...(PUNCH && INTRO ? ['--punch'] : []),
+        ...(layout === 'split' ? ['--seam', String(SEAM_Y)] : []), ...(BAR ? ['--bar'] : []), ...(PUNCH && INTRO ? ['--punch'] : []), ...(LOGO ? ['--logo', inBox(LOGO)] : []),
         ...(still && existsSync(still) ? ['--still', inBox(still)] : [])]);
       const q = existsSync(fin) ? probe(fin) : {};
       if (ri.status === 0 && q.dur >= p.dur - 0.2) {

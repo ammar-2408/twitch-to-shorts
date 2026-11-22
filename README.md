@@ -248,6 +248,11 @@ node make-shorts.mjs https://www.twitch.tv/videos/2932305259 --count 30 --min 35
 | `--layout` | `split` (gameplay top, facecam bottom when there is one) or `full` (the whole picture, no split) | split |
 | `--cam` | Split screen: how much of the height the streamer's facecam gets, in percent (25 to 60). Smaller looks sharper, because the small facecam is enlarged less | 40 |
 | `--intro` | `on` or `off`: the AI voiceover hook at the start of every short | on |
+| `--cam-pos` | Split screen: `bottom` (gameplay on top) or `top` (streamer on top, gameplay below) | bottom |
+| `--logo` | A campaign/sponsor logo (PNG) shown bottom-right for the whole short, e.g. for Content Rewards campaigns. Use with `--cam-pos top` so it sits on the gameplay, not the streamer | none |
+| `--hashtags` | Hashtags added to every caption and tag list, e.g. `"#gta6 #Clipup"` | none |
+| `--out` | The folder inside the run where the shorts go (keeps campaign versions apart from your normal shorts) | final |
+| `--only` | Make only these shorts, by number, e.g. `--only 16,21,44` | all |
 | `--voice` | Which AI voice says the hook. Try `en-US-GuyNeural`, `en-US-RogerNeural`, `en-US-ChristopherNeural`, `en-US-EricNeural` | `en-US-AndrewNeural` |
 
 The link can be a Twitch video link or a YouTube link. OpenShorts must be running first. `start.bat` does this for you, or run `docker compose up -d --build backend` inside the `openshorts` folder.

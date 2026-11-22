@@ -260,6 +260,9 @@ def main():
     share = min(0.6, max(0.25, float(sys.argv[8]))) if len(sys.argv) > 8 else 0.5
     CAM_H = even(OUT_H * share)
     TOP_H = OUT_H - CAM_H
+    # optional: "top" puts the streamer on top and the gameplay below (default: gameplay on top)
+    cam_top = len(sys.argv) > 9 and sys.argv[9] == "top"
+    seam_y = CAM_H if cam_top else TOP_H
     vals = [int(v) for v in box_arg.split(",")]
     box = vals[:4]
     r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", src],
@@ -272,13 +275,14 @@ def main():
     cw, ch, cx, cy = cam_crop(box, window, fw, fh)
     gw, gh, gx, gy = game_crop(fw, fh, window)
     seam = out + ".seam.ass"
-    seam_ass(ass, seam, TOP_H)
+    seam_ass(ass, seam, seam_y)
+    stack = "[bot][top]" if cam_top else "[top][bot]"   # [top] = gameplay band, [bot] = facecam band
     graph = (
         f"[0:v]split=2[g][c];"
         f"[g]crop={gw}:{gh}:{gx}:{gy},scale={OUT_W}:{TOP_H}:flags=lanczos[top];"
         # the cam is small in the source: clean compression blocks first, enlarge, then contrast-adaptive sharpen
         f"[c]crop={cw}:{ch}:{cx}:{cy},hqdn3d=1.5:1.5:4:4,scale={OUT_W}:{CAM_H}:flags=lanczos,cas=0.7[bot];"
-        f"[top][bot]vstack=inputs=2,setsar=1,split=2[comp][raw];"
+        f"{stack}vstack=inputs=2,setsar=1,split=2[comp][raw];"
         f"[comp]ass=filename='{seam}'[v];"
         # the first frame WITHOUT captions: the voiceover intro pauses on it (out.still.png)
         f"[raw]trim=end_frame=1[still]"
@@ -293,7 +297,7 @@ def main():
     finally:
         if os.path.exists(seam):
             os.unlink(seam)
-    print("SPLIT", json.dumps({"seam": TOP_H, "cam_box": box, "window": window, "cam_crop": [cw, ch, cx, cy], "game_crop": [gw, gh, gx, gy]}))
+    print("SPLIT", json.dumps({"seam": seam_y, "cam_top": cam_top, "cam_box": box, "window": window, "cam_crop": [cw, ch, cx, cy], "game_crop": [gw, gh, gx, gy]}))
 
 
 if __name__ == "__main__":

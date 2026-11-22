@@ -108,6 +108,11 @@ def main():
         i = args.index("--still"); still = args[i + 1]; del args[i:i + 2]
         if not os.path.exists(still):
             still = None
+    logo = None    # a sponsor/campaign logo (PNG): bottom-right, on screen for the whole video
+    if "--logo" in args:
+        i = args.index("--logo"); logo = args[i + 1]; del args[i:i + 2]
+        if not os.path.exists(logo):
+            sys.exit(f"logo file not found: {logo}")
     src, out, text = args[0], args[1], " ".join(args[2].split())
     intro = text not in ("", "-")      # "-" = no voiceover, only the bar
     mp3, ass = out + ".voice.mp3", out + ".intro.ass"
@@ -172,15 +177,24 @@ def main():
     else:
         g.append("[0:v]setpts=PTS-STARTPTS,format=yuv420p,setsar=1[v0];[0:a]asetpts=PTS-STARTPTS[a1];")
     dur = total + clip_dur
+    if logo:
+        # the logo as given (aspect kept, never stretched, recoloured or cropped), half the frame wide like the
+        # campaign example, bottom-right: in the streamer-on-top layout that is gameplay, clear of captions and cam
+        li = len(inputs) // 2
+        inputs += ["-i", logo]
+        lw = w // 2
+        g.append(f"[{li}:v]scale={lw}:-1:flags=lanczos,format=rgba[lg];"
+                 f"[v0][lg]overlay=x=W-w-{w // 40}:y=H-h-{h // 48}:format=auto[vl];")
+    vin = "[vl]" if logo else "[v0]"
     if bar:
         bh = max(8, h // 160)   # 12 px on 1920
         g.append(
             f"color=c=0xFFD400:s={w}x{bh}:r={fps}:d={dur:.3f}[bar];"
-            f"[v0]drawbox=x=0:y=0:w=iw:h={bh}:color=black@0.35:t=fill[vt];"
+            f"{vin}drawbox=x=0:y=0:w=iw:h={bh}:color=black@0.35:t=fill[vt];"
             f"[vt][bar]overlay=x='-w+w*t/{dur:.3f}':y=0:eval=frame:shortest=1[v]"
         )
     else:
-        g.append("[v0]null[v]")
+        g.append(f"{vin}null[v]")
     graph = "".join(g).rstrip(";")
     r = subprocess.run(["ffmpeg", "-y", "-v", "error", *inputs, "-filter_complex", graph,
                         "-map", "[v]", "-map", "[a1]", "-c:v", "libx264", "-preset", "fast", "-crf", "16",
