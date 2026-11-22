@@ -53,9 +53,6 @@ const TDL = join(HERE, process.platform === 'win32' ? 'TwitchDownloaderCLI.exe' 
 const OS_OUT = join(HERE, 'openshorts', 'output');
 const DOCKER = 'openshorts-backend'; // container_name in openshorts/docker-compose.yml; it mounts this folder at /host
 
-const RUN = join(HERE, 'runs', ytId ? `yt_${VOD}` : VOD);
-const PIECES = join(RUN, 'pieces'), FINAL = join(RUN, 'final'), EXTRA = join(FINAL, 'extra');
-for (const d of [RUN, PIECES, FINAL]) mkdirSync(d, { recursive: true });
 const log = (...m) => console.log(new Date().toLocaleTimeString(), ...m);
 const run = (cmd, a) => { const r = spawnSync(cmd, a, { stdio: ['ignore', 'ignore', 'inherit'] }); return r.status === 0; };
 const hms = (s) => { s = Math.max(0, Math.round(s)); return `${Math.floor(s / 3600)}:${String(Math.floor(s / 60) % 60).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`; };
@@ -66,6 +63,40 @@ const dockerExec = (a, opts = {}) => spawnSync('docker', ['exec', '-w', '/app', 
 const COOKIES = join(HERE, 'youtube-cookies.txt');
 const cookieArgs = () => (existsSync(COOKIES) ? ['--cookies', inBox(COOKIES)] : []);
 const ytdlp = (a, opts) => dockerExec(['yt-dlp', '--no-warnings', ...(existsSync(COOKIES) ? ['--cookies', inBox(COOKIES)] : []), ...a], opts);
+
+// The run folder: "<Streamer> - <topic> - <date> (<id>)", easy to find in Explorer. An existing folder for this
+// video (an old bare-id name or a named one) is reused, so a stopped run resumes where it was.
+const ID_TAG = ytId ? `yt_${VOD}` : VOD;
+const RUNS = join(HERE, 'runs');
+mkdirSync(RUNS, { recursive: true });
+const clean = (s) => String(s ?? '').replace(/[\p{Extended_Pictographic}️‍]/gu, '').replace(/[\\/:*?"<>|#]/g, ' ').replace(/\s+/g, ' ').trim();
+async function runFolderName() {
+  let streamer = '', title = '', date = '';
+  try {
+    if (ytId) {
+      await waitForOpenShorts(); // yt-dlp runs inside the OpenShorts container
+      const r = ytdlp(['--no-playlist', '-O', '%(.{channel,title,upload_date})j', YT_URL]);
+      const j = JSON.parse(r.stdout);
+      streamer = j.channel; title = j.title; date = String(j.upload_date || '').replace(/^(\d{4})(\d{2})(\d{2})$/, '$1-$2-$3');
+    } else {
+      const r = spawnSync(TDL, ['info', '--id', VOD, '--format', 'raw', '--banner', 'false'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+      for (const line of (r.stdout || '').split('\n')) {
+        try {
+          const v = JSON.parse(line.trim()).data?.video;
+          if (v?.title) { streamer = v.owner?.displayName; title = v.title; date = String(v.createdAt || '').slice(0, 10); break; }
+        } catch { /* not the video line */ }
+      }
+    }
+  } catch { /* no details: fall back to the id */ }
+  if (!streamer && !title) return ID_TAG;
+  const topic = /\bgta\s*(6|vi)\b/i.test(title) ? 'GTA 6' : clean(title).slice(0, 40).trim();
+  return `${clean([streamer, topic, date].filter(Boolean).join(' - ')).slice(0, 100)} (${ID_TAG})`;
+}
+const existingRun = readdirSync(RUNS).find((d) => d === ID_TAG || d.endsWith(`(${ID_TAG})`));
+const RUN = join(RUNS, existingRun ?? await runFolderName());
+const PIECES = join(RUN, 'pieces'), FINAL = join(RUN, 'final'), EXTRA = join(FINAL, 'extra');
+for (const d of [RUN, PIECES, FINAL]) mkdirSync(d, { recursive: true });
+log(`Run folder: ${RUN}`);
 
 const envFile = join(HERE, 'openshorts', '.env');
 const GEMINI = process.env.GEMINI_API_KEY ?? (existsSync(envFile) && readFileSync(envFile, 'utf8').match(/^GEMINI_API_KEY=(.+)$/m)?.[1].trim());

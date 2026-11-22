@@ -155,10 +155,10 @@ Good to know:
 When the window says **Finished**, open this folder inside the project:
 
 ```
-runs\<video number>\final\
+runs\<Streamer> - <game> - <date> (<video id>)\final\
 ```
 
-(For Twitch, the video number is the number at the end of the link. For YouTube the folder is `yt_` plus the video id, for example `runs\yt_3QjXNSf6keg\final\`.)
+Each stream gets its own folder named after the streamer, the game and the stream date, for example `runs\IShowSpeed - GTA 6 - 2026-11-20 (yt_hwSg39yIBGU)\final\`. The id at the end lets the tool find the folder again if you run the same link twice, so don't remove it when renaming.
 
 **Split screen:** if the streamer has a facecam, every short is split screen: gameplay on top, the streamer below, captions on the line in the middle. If a clip has no facecam on screen (for example a full-screen cutscene), that short keeps the full picture instead. Each short's `.txt` says which layout it got.
 
